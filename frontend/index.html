@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Nova Store — Công nghệ chính hãng</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- Navbar -->
+  <header class="nav">
+    <div class="nav-inner">
+      <a href="#" class="brand">
+        <span class="brand-mark">◆</span> Nova<span>Store</span>
+      </a>
+      <nav class="nav-links">
+        <a href="#products">Sản phẩm</a>
+        <a href="#features">Ưu điểm</a>
+      </nav>
+      <button id="cartBtn" class="cart-btn" aria-label="Mở giỏ hàng">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="9" cy="21" r="1"></circle><circle cx="20" cy="21" r="1"></circle>
+          <path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"></path>
+        </svg>
+        <span id="cartCount" class="badge">0</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Hero -->
+  <section class="hero">
+    <div class="hero-overlay"></div>
+    <div class="hero-content">
+      <span class="pill">🚀 Miễn phí vận chuyển toàn quốc</span>
+      <h1>Công nghệ đỉnh cao,<br />giá tốt mỗi ngày</h1>
+      <p>Tai nghe, bàn phím, phụ kiện chính hãng — bảo hành dài hạn, giao hàng nhanh.</p>
+      <a href="#products" class="hero-cta">Mua sắm ngay →</a>
+    </div>
+  </section>
+
+  <!-- Features -->
+  <section id="features" class="features">
+    <div class="feature"><span>🚚</span><div><h4>Giao nhanh</h4><p>Nội thành trong 2h</p></div></div>
+    <div class="feature"><span>🛡️</span><div><h4>Bảo hành 12 tháng</h4><p>1 đổi 1 nếu lỗi</p></div></div>
+    <div class="feature"><span>💳</span><div><h4>Thanh toán linh hoạt</h4><p>COD / chuyển khoản</p></div></div>
+    <div class="feature"><span>⭐</span><div><h4>Hàng chính hãng</h4><p>100% nguyên seal</p></div></div>
+  </section>
+
+  <!-- Products -->
+  <main id="products" class="layout">
+    <div class="section-head">
+      <h2>Sản phẩm nổi bật</h2>
+      <p class="muted">Những món được yêu thích nhất tại Nova Store</p>
+    </div>
+    <div id="products-grid" class="grid">
+      <div class="skeleton"></div><div class="skeleton"></div>
+      <div class="skeleton"></div><div class="skeleton"></div>
+    </div>
+  </main>
+
+  <footer class="footer">
+    <p>© 2026 Nova Store · Demo thương mại điện tử</p>
+  </footer>
+
+  <!-- Cart drawer -->
+  <aside id="cartDrawer" class="drawer" aria-hidden="true">
+    <div class="drawer-head">
+      <h2>🛒 Giỏ hàng</h2>
+      <button id="closeCart" class="icon-btn" aria-label="Đóng">✕</button>
+    </div>
+    <div id="cartItems" class="cart-items"></div>
+    <div class="cart-footer">
+      <div class="cart-total"><span>Tổng cộng</span><strong id="cartTotal">0 ₫</strong></div>
+      <form id="checkoutForm" class="checkout">
+        <input id="customer" type="text" placeholder="Họ và tên" required />
+        <input id="email" type="email" placeholder="Email" required />
+        <button type="submit" class="primary">Đặt hàng ngay</button>
+      </form>
+    </div>
+  </aside>
+  <div id="overlay" class="overlay hidden"></div>
+
+  <!-- Toast -->
+  <div id="toast" class="toast"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

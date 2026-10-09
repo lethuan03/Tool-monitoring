@@ -1,0 +1,8 @@
+node_modules/
+.env
+
+# SQLite leftovers (project now uses MySQL)
+backend/data/
+*.db
+*.db-shm
+*.db-wal
