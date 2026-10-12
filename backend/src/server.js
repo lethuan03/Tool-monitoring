@@ -1,31 +1,23 @@
+// Local runs: load the project-root .env. In containers the file isn't present and env comes from compose.
+require('dotenv').config({ path: require('path').resolve(__dirname, '../../.env') });
+
 const express = require('express');
 const cors = require('cors');
 
-const { initDb } = require('./db');
+const { pool, initDb } = require('./db');
+const { httpMetricsMiddleware, metricsHandler } = require('./metrics');
 const productsRouter = require('./routes/products');
 const ordersRouter = require('./routes/orders');
 
 const app = express();
+app.disable('x-powered-by'); // don't advertise the framework in response headers
 const PORT = process.env.PORT || 3000;
+const startedAt = Date.now();
 
 // --- Middleware ---
+app.use(httpMetricsMiddleware);
 app.use(cors());
 app.use(express.json());
-
-// --- Lightweight in-memory metrics (ready for a monitoring tool to scrape) ---
-const metrics = {
-  startedAt: Date.now(),
-  requests: 0,
-  byStatus: {}
-};
-
-app.use((req, res, next) => {
-  metrics.requests += 1;
-  res.on('finish', () => {
-    metrics.byStatus[res.statusCode] = (metrics.byStatus[res.statusCode] || 0) + 1;
-  });
-  next();
-});
 
 // --- API routes ---
 app.use('/api/products', productsRouter);
@@ -33,26 +25,11 @@ app.use('/api/orders', ordersRouter);
 
 // --- Health check (for container orchestration / monitoring) ---
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', uptimeSeconds: Math.floor((Date.now() - metrics.startedAt) / 1000) });
+  res.json({ status: 'ok', uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000) });
 });
 
-// --- Prometheus-style metrics endpoint (plain text) ---
-app.get('/metrics', (req, res) => {
-  const uptime = Math.floor((Date.now() - metrics.startedAt) / 1000);
-  let body = '';
-  body += '# HELP app_uptime_seconds Process uptime in seconds\n';
-  body += '# TYPE app_uptime_seconds gauge\n';
-  body += `app_uptime_seconds ${uptime}\n`;
-  body += '# HELP app_http_requests_total Total HTTP requests received\n';
-  body += '# TYPE app_http_requests_total counter\n';
-  body += `app_http_requests_total ${metrics.requests}\n`;
-  body += '# HELP app_http_responses_total HTTP responses by status code\n';
-  body += '# TYPE app_http_responses_total counter\n';
-  for (const [code, count] of Object.entries(metrics.byStatus)) {
-    body += `app_http_responses_total{status="${code}"} ${count}\n`;
-  }
-  res.set('Content-Type', 'text/plain; version=0.0.4').send(body);
-});
+// --- Prometheus metrics (scraped by Prometheus on the internal network only) ---
+app.get('/metrics', metricsHandler);
 
 // --- 404 for unknown API routes ---
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
@@ -67,11 +44,23 @@ app.use((err, req, res, next) => {
 async function start() {
   try {
     await initDb();
-    app.listen(PORT, () => {
+    const server = app.listen(PORT, () => {
       console.log(`[server] e-commerce API running on http://localhost:${PORT}`);
       console.log(`[server] health:  http://localhost:${PORT}/health`);
       console.log(`[server] metrics: http://localhost:${PORT}/metrics`);
     });
+
+    // Graceful shutdown: `docker stop` sends SIGTERM
+    const shutdown = (signal) => {
+      console.log(`[server] ${signal} received, shutting down`);
+      server.close(async () => {
+        await pool.end().catch(() => {});
+        process.exit(0);
+      });
+      setTimeout(() => process.exit(1), 10000).unref();
+    };
+    process.on('SIGTERM', shutdown);
+    process.on('SIGINT', shutdown);
   } catch (err) {
     console.error('[server] failed to start:', err.message);
     process.exit(1);

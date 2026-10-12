@@ -1,0 +1,27 @@
+# Prometheus: pulls ("kéo") metrics from every target on the internal Docker network.
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Prometheus itself
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Web app (Express) — exposes /metrics natively via prom-client
+  - job_name: backend
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["backend:3000"]
+
+  # Nginx — via nginx-prometheus-exporter reading stub_status
+  - job_name: nginx
+    static_configs:
+      - targets: ["nginx-exporter:9113"]
+
+  # MySQL — via mysqld-exporter
+  - job_name: mysql
+    static_configs:
+      - targets: ["mysqld-exporter:9104"]

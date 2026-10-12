@@ -1,0 +1,14 @@
+# Grafana tự kết nối tới Prometheus khi khởi động (không cần bấm tay trên giao diện).
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      # Khớp scrape_interval của Prometheus -> $__rate_interval tính đúng
+      timeInterval: 15s

@@ -1,55 +1,57 @@
-const path = require('path');
-const fs = require('fs');
-const Database = require('better-sqlite3');
+const mysql = require('mysql2/promise');
 
-// Database file location (can be overridden for Docker volume mounts)
-const DB_DIR = process.env.DB_DIR || path.join(__dirname, '..', 'data');
-if (!fs.existsSync(DB_DIR)) {
-  fs.mkdirSync(DB_DIR, { recursive: true });
-}
+// Connection settings come from env (.env locally, docker-compose in containers)
+const config = {
+  host: process.env.DB_HOST || 'localhost',
+  port: Number(process.env.DB_PORT) || 3306,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME || 'ecommerce',
+  waitForConnections: true,
+  connectionLimit: Number(process.env.DB_POOL_SIZE) || 10,
+  // Return DECIMAL columns as JS numbers (prices are used in arithmetic)
+  decimalNumbers: true,
+  timezone: 'Z'
+};
 
-const db = new Database(path.join(DB_DIR, 'ecommerce.db'));
-db.pragma('journal_mode = WAL');
+const pool = mysql.createPool(config);
 
 // --- Schema ---
-db.exec(`
-  CREATE TABLE IF NOT EXISTS products (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    name        TEXT    NOT NULL,
-    description TEXT    NOT NULL DEFAULT '',
-    price       REAL    NOT NULL,
-    stock       INTEGER NOT NULL DEFAULT 0,
-    image       TEXT    NOT NULL DEFAULT ''
-  );
+const SCHEMA = [
+  `CREATE TABLE IF NOT EXISTS products (
+    id          INT UNSIGNED  NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    name        VARCHAR(255)  NOT NULL,
+    description TEXT          NOT NULL,
+    price       DECIMAL(12,2) NOT NULL,
+    stock       INT UNSIGNED  NOT NULL DEFAULT 0,
+    image       VARCHAR(512)  NOT NULL DEFAULT ''
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
-  CREATE TABLE IF NOT EXISTS orders (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    customer    TEXT    NOT NULL,
-    email       TEXT    NOT NULL,
-    total       REAL    NOT NULL,
-    created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
-  );
+  `CREATE TABLE IF NOT EXISTS orders (
+    id          INT UNSIGNED  NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    customer    VARCHAR(255)  NOT NULL,
+    email       VARCHAR(255)  NOT NULL,
+    total       DECIMAL(14,2) NOT NULL,
+    created_at  TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 
-  CREATE TABLE IF NOT EXISTS order_items (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    order_id    INTEGER NOT NULL,
-    product_id  INTEGER NOT NULL,
-    name        TEXT    NOT NULL,
-    price       REAL    NOT NULL,
-    quantity    INTEGER NOT NULL,
-    FOREIGN KEY (order_id)   REFERENCES orders(id),
-    FOREIGN KEY (product_id) REFERENCES products(id)
-  );
-`);
+  `CREATE TABLE IF NOT EXISTS order_items (
+    id          INT UNSIGNED  NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    order_id    INT UNSIGNED  NOT NULL,
+    product_id  INT UNSIGNED  NOT NULL,
+    name        VARCHAR(255)  NOT NULL,
+    price       DECIMAL(12,2) NOT NULL,
+    quantity    INT UNSIGNED  NOT NULL,
+    CONSTRAINT fk_items_order   FOREIGN KEY (order_id)   REFERENCES orders(id),
+    CONSTRAINT fk_items_product FOREIGN KEY (product_id) REFERENCES products(id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
+];
 
 // --- Seed sample products on first run ---
-function seed() {
-  const count = db.prepare('SELECT COUNT(*) AS c FROM products').get().c;
-  if (count > 0) return;
+async function seed() {
+  const [[{ c }]] = await pool.query('SELECT COUNT(*) AS c FROM products');
+  if (c > 0) return;
 
-  const insert = db.prepare(
-    'INSERT INTO products (name, description, price, stock, image) VALUES (?, ?, ?, ?, ?)'
-  );
   const sample = [
     ['Wireless Headphones', 'Noise-cancelling over-ear headphones', 1290000, 25, 'https://picsum.photos/seed/headphones/400/300'],
     ['Mechanical Keyboard', 'RGB hot-swappable mechanical keyboard', 1890000, 15, 'https://picsum.photos/seed/keyboard/400/300'],
@@ -58,13 +60,29 @@ function seed() {
     ['Laptop Stand', 'Aluminium adjustable laptop stand', 450000, 50, 'https://picsum.photos/seed/stand/400/300'],
     ['Wireless Mouse', 'Ergonomic silent wireless mouse', 390000, 60, 'https://picsum.photos/seed/mouse/400/300']
   ];
-  const tx = db.transaction((rows) => {
-    for (const r of rows) insert.run(...r);
-  });
-  tx(sample);
+  await pool.query('INSERT INTO products (name, description, price, stock, image) VALUES ?', [sample]);
   console.log(`[db] seeded ${sample.length} sample products`);
 }
 
-seed();
+// --- Wait for MySQL to accept connections (container start order, restarts) ---
+async function waitForDb(retries = Number(process.env.DB_CONNECT_RETRIES) || 30, delayMs = 2000) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await pool.query('SELECT 1');
+      return;
+    } catch (err) {
+      if (attempt >= retries) throw err;
+      console.warn(`[db] not ready (${err.code || err.message}), retry ${attempt}/${retries}`);
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+}
 
-module.exports = db;
+async function initDb() {
+  await waitForDb();
+  for (const stmt of SCHEMA) await pool.query(stmt);
+  await seed();
+  console.log(`[db] connected to mysql://${config.host}:${config.port}/${config.database}`);
+}
+
+module.exports = { pool, initDb };

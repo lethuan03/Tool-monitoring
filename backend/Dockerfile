@@ -1,8 +1,8 @@
-# --- Build stage: install backend deps ---
+# --- Build stage: install backend deps (reproducible from the lockfile) ---
 FROM node:20-bookworm-slim AS build
 WORKDIR /app
-COPY package.json ./
-RUN npm install --omit=dev
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
 
 # --- Runtime stage ---
 FROM node:20-bookworm-slim
@@ -11,8 +11,11 @@ WORKDIR /app
 ENV NODE_ENV=production \
     PORT=3000
 
-COPY --from=build /app/node_modules ./node_modules
-COPY . .
+COPY --from=build --chown=node:node /app/node_modules ./node_modules
+COPY --chown=node:node . .
+
+# Run as the unprivileged user shipped with the node image
+USER node
 
 EXPOSE 3000
 
