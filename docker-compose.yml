@@ -19,7 +19,8 @@ services:
       - appnet
     restart: unless-stopped
 
-  # 2) Backend API (Express)
+  # 2) Backend API (Express) — NOT published to the host, only reachable
+  #    inside the Docker network via the service name "backend".
   backend:
     build: ./backend
     container_name: ecommerce-backend
@@ -38,7 +39,7 @@ services:
       - appnet
     restart: unless-stopped
 
-  # 3) Frontend (static files served by nginx)
+  # 3) Frontend (static files served by nginx) — not published to the host
   frontend:
     build: ./frontend
     container_name: ecommerce-frontend
@@ -46,7 +47,7 @@ services:
       - appnet
     restart: unless-stopped
 
-  # 4) Edge reverse proxy (single public entry point)
+  # 4) Edge reverse proxy — the ONLY service published to the host/internet
   nginx:
     image: nginx:alpine
     container_name: ecommerce-nginx
