@@ -1,0 +1,19 @@
+# Grafana tự kết nối tới Loki khi khởi động (không cần bấm tay trên giao diện).
+# Từ đây, Grafana có 2 nguồn dữ liệu:
+#   Prometheus -> SỐ   (PromQL)  "có bao nhiêu lỗi 5xx?"
+#   Loki       -> LOG  (LogQL)   "lỗi đó nội dung là gì?"
+apiVersion: 1
+
+datasources:
+  - name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    isDefault: false
+    editable: false
+    jsonData:
+      # Số dòng tối đa trả về cho một truy vấn trên giao diện
+      maxLines: 1000
+      # Timeout truy vấn log (giây)
+      timeout: 60

@@ -1,4 +1,5 @@
 const client = require('prom-client');
+const { routeTemplate } = require('./http-route');
 
 // Process / Node.js runtime metrics: CPU, memory, event loop lag, GC, handles...
 const register = client.register;
@@ -17,17 +18,12 @@ const httpRequestDuration = new client.Histogram({
   buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]
 });
 
-// Use the matched route template (e.g. /api/orders/:id), never the raw URL,
-// so label cardinality stays bounded no matter what clients request.
-function routeLabel(req) {
-  if (req.route && req.route.path) return `${req.baseUrl}${req.route.path}`;
-  return 'unmatched';
-}
-
 function httpMetricsMiddleware(req, res, next) {
   const end = httpRequestDuration.startTimer();
   res.on('finish', () => {
-    const labels = { method: req.method, route: routeLabel(req), status_code: String(res.statusCode) };
+    // routeTemplate dùng chung với log (xem src/http-route.js) để nhãn route
+    // trên Prometheus và trên Loki luôn khớp nhau
+    const labels = { method: req.method, route: routeTemplate(req), status_code: String(res.statusCode) };
     httpRequestsTotal.inc(labels);
     end(labels);
   });

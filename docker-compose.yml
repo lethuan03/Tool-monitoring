@@ -42,6 +42,8 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3000
+      # debug | info | warn | error — xem backend/src/logger.js
+      - LOG_LEVEL=${LOG_LEVEL:-info}
       - DB_HOST=db
       - DB_PORT=3306
       - DB_USER=${MYSQL_USER}
@@ -140,9 +142,67 @@ services:
     logging: *default-logging
     restart: unless-stopped
 
+  # ============ MONITORING: LOGS ============
+
+  # 8) Loki — lưu log (vai trò giống Prometheus nhưng cho log, hỏi bằng LogQL)
+  loki:
+    image: grafana/loki:3.7.6
+    container_name: ecommerce-loki
+    command:
+      - -config.file=/etc/loki/loki-config.yml
+      # Cho phép dùng ${BIẾN} trong file config (dùng cho retention)
+      - -config.expand-env=true
+    environment:
+      # Compose tự điền mặc định 168h (7 ngày) nếu .env không đặt,
+      # nên Loki luôn nhận được giá trị cụ thể
+      - LOKI_RETENTION_PERIOD=${LOKI_RETENTION_PERIOD:-168h}
+    volumes:
+      - ./loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki-data:/loki
+    # Không đặt healthcheck: image Loki là distroless, không có sh/wget/curl nên
+    # mọi lệnh healthcheck đều fail và container bị báo "unhealthy" oan.
+    # Kiểm tra bằng tay từ máy host: curl http://127.0.0.1:3100/ready
+    ports:
+      # Loopback only, giống Prometheus: chỉ để gỡ lỗi trên máy đó
+      - "127.0.0.1:${LOKI_PORT:-3100}:3100"
+    networks:
+      - appnet
+    logging: *default-logging
+    restart: unless-stopped
+
+  # 9) Alloy — đọc log của mọi container qua docker socket, parse, đẩy sang Loki
+  alloy:
+    image: grafana/alloy:v1.20.1
+    container_name: ecommerce-alloy
+    # Cần quyền root để đọc /var/run/docker.sock (socket thuộc root:docker).
+    # Socket được mount READ-ONLY để Alloy chỉ đọc được, không điều khiển Docker.
+    user: root
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    volumes:
+      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy-data:/var/lib/alloy/data
+    # Cũng không có sh/wget/curl trong image -> không đặt healthcheck.
+    # Kiểm tra bằng tay: curl http://127.0.0.1:12345/-/ready
+    ports:
+      # Giao diện gỡ lỗi của Alloy (xem pipeline, số dòng đã đọc) — loopback only
+      - "127.0.0.1:${ALLOY_PORT:-12345}:12345"
+    depends_on:
+      # Chỉ cần Loki đã khởi động, không chờ "healthy": nếu Loki chưa sẵn sàng,
+      # loki.write của Alloy tự thử lại (retry) nên không mất log.
+      - loki
+    networks:
+      - appnet
+    logging: *default-logging
+    restart: unless-stopped
+
   # ============ MONITORING: DASHBOARD ============
 
-  # 8) Grafana (asks Prometheus, draws auto-refreshing dashboards — stores no metrics itself)
+  # 10) Grafana (asks Prometheus + Loki, draws auto-refreshing dashboards — stores nothing itself)
   grafana:
     image: grafana/grafana:11.3.0
     container_name: ecommerce-grafana
@@ -169,6 +229,7 @@ services:
       retries: 3
     depends_on:
       - prometheus
+      - loki
     networks:
       - appnet
     logging: *default-logging
@@ -182,3 +243,5 @@ volumes:
   ecommerce-db-data:
   prometheus-data:
   grafana-data:
+  loki-data:
+  alloy-data:

@@ -1,4 +1,5 @@
 const mysql = require('mysql2/promise');
+const { log } = require('./logger');
 
 // Connection settings come from env (.env locally, docker-compose in containers)
 const config = {
@@ -61,7 +62,7 @@ async function seed() {
     ['Wireless Mouse', 'Ergonomic silent wireless mouse', 390000, 60, 'https://picsum.photos/seed/mouse/400/300']
   ];
   await pool.query('INSERT INTO products (name, description, price, stock, image) VALUES ?', [sample]);
-  console.log(`[db] seeded ${sample.length} sample products`);
+  log.info('db_seeded', { products: sample.length });
 }
 
 // --- Wait for MySQL to accept connections (container start order, restarts) ---
@@ -72,7 +73,12 @@ async function waitForDb(retries = Number(process.env.DB_CONNECT_RETRIES) || 30,
       return;
     } catch (err) {
       if (attempt >= retries) throw err;
-      console.warn(`[db] not ready (${err.code || err.message}), retry ${attempt}/${retries}`);
+      log.warn('db_not_ready', {
+        err_code: err.code || '',
+        err_message: err.message,
+        attempt,
+        retries
+      });
       await new Promise((r) => setTimeout(r, delayMs));
     }
   }
@@ -82,7 +88,7 @@ async function initDb() {
   await waitForDb();
   for (const stmt of SCHEMA) await pool.query(stmt);
   await seed();
-  console.log(`[db] connected to mysql://${config.host}:${config.port}/${config.database}`);
+  log.info('db_connected', { host: config.host, port: config.port, database: config.database });
 }
 
 module.exports = { pool, initDb };

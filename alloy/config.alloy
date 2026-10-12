@@ -1,0 +1,251 @@
+// ============================================================================
+// Grafana Alloy — "người đi gom log".
+//
+// Vai trò trong hệ thống này:
+//   Container viết log ra stdout/stderr
+//        -> Docker lưu thành file json-file
+//        -> ALLOY đọc, PHÂN TÍCH (parse) thành nhãn + field
+//        -> đẩy (push) sang Loki
+//        -> Grafana hỏi Loki bằng LogQL và vẽ ra
+//
+// Khác với Prometheus (tự đi KÉO số về - pull), Alloy chủ động ĐẨY log sang
+// Loki (push). Đó là lý do Loki không cần biết gì về các container.
+//
+// NGUYÊN TẮC QUAN TRỌNG VỀ NHÃN (label):
+//   Loki chỉ index nhãn, nên mỗi tổ hợp nhãn = 1 "stream" riêng. Chỉ đặt làm
+//   nhãn những thứ có SỐ GIÁ TRỊ HỮU HẠN: service, container, level, method,
+//   status. KHÔNG bao giờ đặt path/URL/user_id/order_id làm nhãn — chúng vô
+//   hạn và sẽ làm Loki phình to (gọi là "cardinality explosion").
+//   Những field đó vẫn nằm trong nội dung dòng log và vẫn lọc được bằng
+//   toán tử `| json | path="/api/orders/"` của LogQL.
+// ============================================================================
+
+logging {
+  level  = "warn"
+  format = "logfmt"
+}
+
+// ---------------------------------------------------------------------------
+// 1) TÌM container đang chạy (service discovery qua docker socket)
+// ---------------------------------------------------------------------------
+discovery.docker "compose" {
+  host             = "unix:///var/run/docker.sock"
+  refresh_interval = "5s"
+}
+
+// ---------------------------------------------------------------------------
+// 2) ĐẶT NHÃN cho từng container, và lọc chỉ lấy container của hệ thống này
+// ---------------------------------------------------------------------------
+discovery.relabel "compose" {
+  targets = discovery.docker.compose.targets
+
+  // Chỉ gom log của đúng các service trong docker-compose.yml này.
+  // Liệt kê tường minh (thay vì lọc theo tên project) để nếu máy bạn còn
+  // chạy project docker khác thì log của nó không lọt vào đây.
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    regex         = "db|backend|frontend|nginx|nginx-exporter|mysqld-exporter|node-exporter|cadvisor|prometheus|grafana|loki|alloy"
+    action        = "keep"
+  }
+
+  // service = tên service trong compose (backend, nginx, db...) -> nhãn chính để lọc
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+
+  // container = tên container thật (ecommerce-backend...), bỏ dấu "/" đầu
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/?(.*)"
+    target_label  = "container"
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 3) ĐỌC log của các container vừa tìm được
+// ---------------------------------------------------------------------------
+loki.source.docker "compose" {
+  host             = "unix:///var/run/docker.sock"
+  targets          = discovery.relabel.compose.output
+  labels           = { job = "docker" }
+  forward_to       = [loki.process.parse.receiver]
+  refresh_interval = "5s"
+}
+
+// ---------------------------------------------------------------------------
+// 4) PHÂN TÍCH log — mỗi service có định dạng log khác nhau nên parse khác nhau
+// ---------------------------------------------------------------------------
+loki.process "parse" {
+
+  // ======================= nginx (cửa vào web) =======================
+  // Access log đã được cấu hình xuất JSON (xem nginx/default.conf), nên
+  // parse được trực tiếp: status, method, path, thời gian xử lý...
+  stage.match {
+    selector = "{service=\"nginx\"}"
+
+    stage.json {
+      expressions = {
+        status        = "status",
+        method        = "method",
+        path          = "path",
+        request_time  = "request_time",
+        upstream_time = "upstream_time",
+      }
+    }
+
+    // Dòng error log của nginx KHÔNG phải JSON, nó có dạng:
+    //   2026/10/12 05:47:54 [error] 29#29: *123 connect() failed ...
+    // nên bắt mức độ trong cặp ngoặc vuông.
+    stage.regex {
+      expression = "\\[(?P<nginx_level>emerg|alert|crit|error|warn|notice)\\]"
+    }
+
+    // Suy ra mức độ nghiêm trọng từ HTTP status:
+    //   5xx = error (server lỗi) · 4xx = warn (khách gửi sai) · còn lại = info
+    stage.template {
+      source   = "level"
+      template = "{{ if .status }}{{ if ge (atoi .status) 500 }}error{{ else if ge (atoi .status) 400 }}warn{{ else }}info{{ end }}{{ else if .nginx_level }}error{{ else }}info{{ end }}"
+    }
+
+    // status/method có số giá trị hữu hạn -> đặt nhãn được.
+    // path thì KHÔNG (xem ghi chú đầu file).
+    stage.labels {
+      values = {
+        method = "method",
+        status = "status",
+      }
+    }
+
+    // Thời gian xử lý request -> đưa vào structured metadata để xem/sort
+    // được trong Grafana mà không tạo thêm stream mới.
+    stage.structured_metadata {
+      values = {
+        request_time  = "request_time",
+        upstream_time = "upstream_time",
+      }
+    }
+  }
+
+  // ======================= frontend (nginx tĩnh) =======================
+  // Container này dùng access log mặc định (combined), không phải JSON,
+  // nên bóc bằng regex.
+  stage.match {
+    selector = "{service=\"frontend\"}"
+
+    stage.regex {
+      expression = "\"(?P<method>[A-Z]+) (?P<path>[^ ]+) HTTP/[0-9.]+\" (?P<status>\\d{3})"
+    }
+
+    stage.template {
+      source   = "level"
+      template = "{{ if .status }}{{ if ge (atoi .status) 500 }}error{{ else if ge (atoi .status) 400 }}warn{{ else }}info{{ end }}{{ else }}info{{ end }}"
+    }
+
+    stage.labels {
+      values = {
+        method = "method",
+        status = "status",
+      }
+    }
+  }
+
+  // ======================= backend (web app) =======================
+  // Backend đã xuất log dạng JSON 1 dòng / 1 bản ghi (xem backend/src/logger.js)
+  stage.match {
+    selector = "{service=\"backend\"}"
+
+    stage.json {
+      expressions = {
+        level       = "level",
+        msg         = "msg",
+        route       = "route",
+        status      = "status",
+        duration_ms = "duration_ms",
+      }
+    }
+
+    // Dùng luôn mốc thời gian do app ghi, thay vì thời điểm Alloy đọc được
+    stage.timestamp {
+      source   = "time"
+      format   = "RFC3339Nano"
+      fallback_formats = ["RFC3339"]
+      action_on_failure = "fudge"
+    }
+
+    stage.labels {
+      values = {
+        status = "status",
+      }
+    }
+
+    stage.structured_metadata {
+      values = {
+        route       = "route",
+        duration_ms = "duration_ms",
+      }
+    }
+  }
+
+  // ======================= MySQL =======================
+  // Log MySQL có dạng:
+  //   2026-10-12T05:47:54.123456Z 0 [Warning] [MY-010068] [Server] ...
+  stage.match {
+    selector = "{service=\"db\"}"
+
+    stage.regex {
+      expression = "\\[(?P<mysql_level>System|Warning|Note|ERROR|Error)\\]"
+    }
+
+    stage.template {
+      source   = "level"
+      template = "{{ if eq .mysql_level \"ERROR\" }}error{{ else if eq .mysql_level \"Error\" }}error{{ else if eq .mysql_level \"Warning\" }}warn{{ else }}info{{ end }}"
+    }
+  }
+
+  // ======================= các tool còn lại =======================
+  // Prometheus, Grafana, Loki, Alloy và 2 exporter đều ghi log kiểu logfmt
+  // (key=value), nên lấy trực tiếp key `level`.
+  stage.match {
+    selector = "{service=~\"prometheus|grafana|loki|alloy|nginx-exporter|mysqld-exporter|node-exporter|cadvisor\"}"
+
+    stage.logfmt {
+      mapping = {
+        level = "",
+        msg   = "",
+      }
+    }
+  }
+
+  // ======================= chuẩn hoá chung =======================
+  // Prometheus 3.x ghi "level=INFO" (chữ hoa), Grafana ghi "level=info".
+  // Đưa hết về chữ thường và mặc định là "info" nếu không parse được,
+  // để ô lọc theo level trên dashboard hoạt động nhất quán.
+  stage.template {
+    source   = "level"
+    template = "{{ if .Value }}{{ ToLower .Value }}{{ else }}info{{ end }}"
+  }
+
+  // Gom "warning" -> "warn", "err"/"eror" -> "error" cho đồng nhất
+  stage.template {
+    source   = "level"
+    template = "{{ if eq .Value \"warning\" }}warn{{ else if eq .Value \"err\" }}error{{ else if eq .Value \"eror\" }}error{{ else if eq .Value \"critical\" }}error{{ else if eq .Value \"fatal\" }}error{{ else }}{{ .Value }}{{ end }}"
+  }
+
+  stage.labels {
+    values = {
+      level = "level",
+    }
+  }
+
+  forward_to = [loki.write.default.receiver]
+}
+
+// ---------------------------------------------------------------------------
+// 5) ĐẨY sang Loki
+// ---------------------------------------------------------------------------
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

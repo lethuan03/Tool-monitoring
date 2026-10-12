@@ -1,0 +1,103 @@
+# ============================================================================
+# Loki — "sổ ghi log". Vai trò giống Prometheus nhưng cho LOG thay vì số:
+#   Prometheus lưu chuỗi số theo thời gian  ->  hỏi bằng PromQL
+#   Loki       lưu dòng log theo thời gian  ->  hỏi bằng LogQL
+#
+# Điểm quan trọng: Loki KHÔNG đánh chỉ mục (index) nội dung log. Nó chỉ index
+# các NHÃN (label). Nhờ vậy rất nhẹ và rẻ, nhưng cũng là lý do phải giữ số
+# lượng nhãn ít và có giá trị hữu hạn (xem alloy/config.alloy).
+#
+# Cấu hình này chạy chế độ "single binary" (tất cả thành phần trong 1 tiến
+# trình, lưu xuống đĩa local) — đủ cho demo/một máy, không dùng cho cụm lớn.
+# ============================================================================
+
+# Không bật xác thực multi-tenant: chỉ Grafana trong mạng nội bộ gọi vào.
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  # Chỉ ghi log từ mức warn trở lên, tránh Loki tự làm ồn log của chính nó
+  log_level: warn
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  # 1 bản sao: máy đơn, không có cụm để nhân bản
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+# Định dạng lưu trữ. TSDB + schema v13 là chuẩn hiện hành của Loki 3.x.
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+storage_config:
+  tsdb_shipper:
+    active_index_directory: /loki/tsdb-index
+    cache_location: /loki/tsdb-cache
+  filesystem:
+    directory: /loki/chunks
+
+limits_config:
+  # Giữ log bao lâu rồi xoá (đặt trong .env, mặc định 168h = 7 ngày)
+  retention_period: ${LOKI_RETENTION_PERIOD}
+
+  # Chặn một container phát log điên loạn làm đầy đĩa
+  ingestion_rate_mb: 8
+  ingestion_burst_size_mb: 16
+  per_stream_rate_limit: 4MB
+  per_stream_rate_limit_burst: 8MB
+
+  # Giới hạn độ dài 1 dòng log (dòng dài hơn sẽ bị cắt)
+  max_line_size: 256KB
+  max_line_size_truncate: true
+
+  # Chặn nhãn rác: nhiều nhãn/giá trị nhãn = Loki phình to (xem ghi chú đầu file)
+  max_label_names_per_series: 15
+
+  # Cho phép structured metadata (Loki 3.x) — gắn field vào dòng log mà
+  # không phải biến nó thành label (không làm tăng số stream)
+  allow_structured_metadata: true
+
+  # Bật API /index/volume để Grafana vẽ được biểu đồ cột "log volume"
+  # phía trên khung Explore -> Logs
+  volume_enabled: true
+
+  # Cho phép truy vấn ngược về tối đa 7 ngày (khớp retention)
+  max_query_lookback: 168h
+
+# Compactor dọn index và THỰC THI retention (không bật thì log không bao giờ bị xoá)
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: true
+  retention_delete_delay: 2h
+  delete_request_store: filesystem
+
+querier:
+  max_concurrent: 4
+
+# Chỗ đặt luật cảnh báo trên log — để sẵn, dùng ở bước sau (Alertmanager)
+ruler:
+  storage:
+    type: local
+    local:
+      directory: /loki/rules
+  rule_path: /loki/rules-temp
+  enable_api: true
+
+# Không gửi thống kê sử dụng ra ngoài internet
+analytics:
+  reporting_enabled: false

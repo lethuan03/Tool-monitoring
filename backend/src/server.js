@@ -6,6 +6,8 @@ const cors = require('cors');
 
 const { pool, initDb } = require('./db');
 const { httpMetricsMiddleware, metricsHandler } = require('./metrics');
+const { log, requestLogger } = require('./logger');
+const { stampMount } = require('./http-route');
 const productsRouter = require('./routes/products');
 const ordersRouter = require('./routes/orders');
 
@@ -15,13 +17,17 @@ const PORT = process.env.PORT || 3000;
 const startedAt = Date.now();
 
 // --- Middleware ---
+// Đặt trước mọi thứ: metrics đếm số, requestLogger ghi log cho CÙNG một request
 app.use(httpMetricsMiddleware);
+app.use(requestLogger);
 app.use(cors());
 app.use(express.json());
 
 // --- API routes ---
-app.use('/api/products', productsRouter);
-app.use('/api/orders', ordersRouter);
+// stampMount: ghi sẵn đường dẫn mount vào req để nhãn `route` của metrics/log
+// vẫn đúng khi request bị lỗi (xem giải thích trong src/http-route.js)
+app.use('/api/products', stampMount('/api/products'), productsRouter);
+app.use('/api/orders', stampMount('/api/orders'), ordersRouter);
 
 // --- Health check (for container orchestration / monitoring) ---
 app.get('/health', (req, res) => {
@@ -36,7 +42,14 @@ app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 
 // --- Error handler ---
 app.use((err, req, res, next) => {
-  console.error('[error]', err);
+  // Log kèm ngữ cảnh để tra được trên Grafana: lỗi ở route nào, mã lỗi gì
+  log.error('unhandled_error', {
+    method: req.method,
+    path: req.originalUrl,
+    err_message: err.message,
+    err_code: err.code || '',
+    stack: err.stack
+  });
   res.status(500).json({ error: 'Internal server error' });
 });
 
@@ -45,16 +58,15 @@ async function start() {
   try {
     await initDb();
     const server = app.listen(PORT, () => {
-      console.log(`[server] e-commerce API running on http://localhost:${PORT}`);
-      console.log(`[server] health:  http://localhost:${PORT}/health`);
-      console.log(`[server] metrics: http://localhost:${PORT}/metrics`);
+      log.info('server_started', { port: Number(PORT), health: '/health', metrics: '/metrics' });
     });
 
     // Graceful shutdown: `docker stop` sends SIGTERM
     const shutdown = (signal) => {
-      console.log(`[server] ${signal} received, shutting down`);
+      log.info('shutdown_started', { signal });
       server.close(async () => {
         await pool.end().catch(() => {});
+        log.info('shutdown_complete', { signal });
         process.exit(0);
       });
       setTimeout(() => process.exit(1), 10000).unref();
@@ -62,7 +74,7 @@ async function start() {
     process.on('SIGTERM', shutdown);
     process.on('SIGINT', shutdown);
   } catch (err) {
-    console.error('[server] failed to start:', err.message);
+    log.error('server_start_failed', { err_message: err.message, stack: err.stack });
     process.exit(1);
   }
 }
