@@ -13,6 +13,13 @@ const ordersRouter = require('./routes/orders');
 
 const app = express();
 app.disable('x-powered-by'); // don't advertise the framework in response headers
+// Backend đứng SAU nginx: kết nối TCP tới backend luôn đến từ container nginx.
+// Không có dòng này thì req.ip luôn là IP nội bộ của nginx (172.x.x.x), log
+// không biết khách thật là ai.
+// trust proxy = 1: tin ĐÚNG 1 lớp proxy (nginx). Express lấy IP mà nginx tự
+// ghi vào cuối header X-Forwarded-For, bỏ qua phần khách tự gửi lên -> khách
+// không giả mạo IP được. Xem README #29.
+app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3000;
 const startedAt = Date.now();
 
@@ -54,6 +61,20 @@ app.use((err, req, res, next) => {
 });
 
 // --- Bootstrap: wait for the database before accepting traffic ---
+// Lỗi không ai bắt (crash): ghi thành MỘT dòng JSON kèm stack rồi thoát.
+// Mặc định Node in stack trace ra nhiều dòng, Loki cắt thành nhiều bản ghi rời
+// rạc, khó đọc và sai level. Docker (restart: unless-stopped) sẽ tự bật lại
+// container. Xem README #32.
+process.on('uncaughtException', (err) => {
+  log.error('uncaught_exception', { err_message: err.message, err_code: err.code || '', stack: err.stack });
+  process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+  const err = reason instanceof Error ? reason : new Error(String(reason));
+  log.error('unhandled_rejection', { err_message: err.message, err_code: err.code || '', stack: err.stack });
+  process.exit(1);
+});
+
 async function start() {
   try {
     await initDb();

@@ -1,0 +1,138 @@
+# Luật cảnh báo của Prometheus.
+#
+# Cách hoạt động: cứ mỗi `evaluation_interval` (15s, đặt trong prometheus.yml)
+# Prometheus chạy lại từng câu `expr`. Câu nào ra kết quả (khác rỗng) thì cảnh báo
+# chuyển sang PENDING; nếu vẫn đúng liên tục đủ thời gian `for` thì thành FIRING.
+# `for` để tránh báo nhầm vì một cú tăng vọt vài giây.
+#
+# CHẾ ĐỘ DEMO: mọi luật đều tính trên số liệu 1 phút gần nhất ([1m]) và chờ 1 phút
+# (for: 1m), nên sự cố kéo dài khoảng 1-2 phút là đỏ, dễ thấy khi test.
+# Lên production nên nới ra (ví dụ CPU/độ trễ: [5m] + for: 10m; RAM/ổ đĩa/5xx:
+# [5m] + for: 5m), nếu không một cú tăng ngắn cũng báo, người trực bị "nhờn" cảnh báo.
+#
+# Xem trạng thái: http://localhost:9090/alerts (hoặc Grafana > Alerting > Alert rules).
+# Luật nào FIRING thì Prometheus đẩy sang Alertmanager, Alertmanager nhắn
+# Telegram và/hoặc gửi mail (README mục 7.14, 7.15). Giải thích luật: README mục 7.11.
+#
+# severity: critical = hỏng thật, phải xử lý ngay; warning = sắp có chuyện, xem trong ngày.
+
+groups:
+  # ---------- 1. Có thành phần nào chết không? ----------
+  - name: song-chet
+    rules:
+      - alert: TargetDown
+        # up = 0 nghĩa là Prometheus gọi tới target đó mà không được trả lời
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Prometheus không lấy được số từ {{ $labels.job }} ({{ $labels.instance }})"
+          description: "Target {{ $labels.instance }} không trả lời hơn 1 phút. Kiểm tra: docker compose ps xem container nào không Up, rồi docker compose logs <tên service đó>."
+
+      - alert: NginxDown
+        # Exporter còn sống nhưng không đọc được stub_status của nginx
+        expr: nginx_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "nginx-exporter không đọc được nginx"
+          description: "nginx có thể đã chết hoặc cấu hình lỗi. Khách không vào được web. Kiểm tra: docker compose logs nginx."
+
+      - alert: MySQLDown
+        # Exporter còn sống nhưng không đăng nhập được MySQL
+        expr: mysql_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "mysqld-exporter không kết nối được MySQL"
+          description: "MySQL có thể đã chết, hết kết nối, hoặc sai mật khẩu user exporter. Đặt hàng sẽ lỗi. Kiểm tra: docker compose logs db."
+
+  # ---------- 2. Khách dùng web có bị lỗi / chậm không? ----------
+  - name: ung-dung
+    rules:
+      - alert: High5xxRate
+        # Tỉ lệ request lỗi 5xx trên tổng request (bỏ /health và /metrics), trong 1 phút gần nhất.
+        # Điều kiện "> 0.1 request/giây" để lúc vắng khách, 1 lỗi lẻ không thành 100%.
+        expr: |
+          (
+            sum(rate(http_requests_total{job="backend",route!~"/health|/metrics",status_code=~"5.."}[1m]))
+            /
+            sum(rate(http_requests_total{job="backend",route!~"/health|/metrics"}[1m]))
+          ) > 0.05
+          and
+          sum(rate(http_requests_total{job="backend",route!~"/health|/metrics"}[1m])) > 0.1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Hơn 5% request bị lỗi 5xx ({{ $value | humanizePercentage }})"
+          description: "Backend đang trả lỗi máy chủ. Xem dashboard Shop Logs, lọc level=error để biết route nào, lỗi gì."
+
+      - alert: HighLatencyP95
+        # 95% request phải xong dưới 1 giây; quá thì khách bắt đầu thấy chậm
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(http_request_duration_seconds_bucket{job="backend",route!~"/health|/metrics"}[1m]))
+          ) > 1
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Web chậm: 5% request chậm nhất mất hơn {{ $value | humanizeDuration }}"
+          description: "Thường do MySQL chậm hoặc máy chủ quá tải. Xem các ô CPU/RAM máy chủ và Query MySQL trên dashboard."
+
+      - alert: MySQLTooManyConnections
+        # Dùng quá 80% số kết nối tối đa; chạm 100% là app không lấy được kết nối
+        expr: mysql_global_status_threads_connected / mysql_global_variables_max_connections > 0.8
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MySQL đã dùng {{ $value | humanizePercentage }} số kết nối tối đa"
+          description: "Sắp hết kết nối. Tìm ai đang giữ kết nối: docker exec -it ecommerce-db mysql -uroot -p, rồi SHOW PROCESSLIST."
+
+  # ---------- 3. Máy chủ còn đủ sức không? (số từ node-exporter) ----------
+  - name: may-chu
+    rules:
+      - alert: HostHighCpu
+        expr: 100 * (1 - avg(rate(node_cpu_seconds_total{mode="idle"}[1m]))) > 90
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CPU máy chủ trên 90% suốt 1 phút ({{ $value | printf \"%.0f\" }}%)"
+          description: "Máy đang quá tải. Xem container nào ăn CPU: docker stats."
+
+      - alert: HostHighMemory
+        expr: 100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) > 90
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "RAM máy chủ đã dùng trên 90% ({{ $value | printf \"%.0f\" }}%)"
+          description: "Hết RAM thì Linux sẽ giết bớt chương trình (thường là MySQL). Xem: docker stats."
+
+      - alert: HostDiskAlmostFull
+        expr: |
+          100 * (1 - node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay"}
+                   / node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|overlay"}) > 85
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Ổ đĩa / đã dùng {{ $value | printf \"%.0f\" }}%"
+          description: "Còn ít chỗ trống. Dọn: docker system df để xem, docker image prune để xoá image cũ."
+
+      - alert: HostDiskFull
+        expr: |
+          100 * (1 - node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay"}
+                   / node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|overlay"}) > 95
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Ổ đĩa / gần đầy: {{ $value | printf \"%.0f\" }}%"
+          description: "Đầy ổ là MySQL, Loki, Prometheus không ghi được nữa. Phải dọn ngay."

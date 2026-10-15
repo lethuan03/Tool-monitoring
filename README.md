@@ -58,7 +58,8 @@ Tắt: `docker compose down` (giữ dữ liệu) · Xoá sạch cả dữ liệu
 
 | Port   | Của ai               | Mở ra ngoài máy? | Ghi chú |
 | ------ | -------------------- | ---------------- | ------- |
-| `8080` | Nginx (cửa vào web)  | Có               | Đổi được qua `HTTP_PORT` trong `.env` |
+| `8080` | Nginx (cửa vào web)  | Có               | Đổi được qua `HTTP_PORT` trong `.env`. Trên EC2 đặt `80` |
+| `443`  | Nginx (HTTPS)        | Có, **chỉ trên EC2** | Chỉ mở khi chạy kèm `docker-compose.https.yml` (mục 7.10) |
 | `3001` | Grafana              | Chỉ `localhost`  | Đổi được qua `GRAFANA_PORT` trong `.env` |
 | `9090` | Prometheus           | Chỉ `localhost`  | Chỉ người ngồi trên máy đó mở được |
 | `3100` | Loki (lưu log)       | Chỉ `localhost`  | Đổi qua `LOKI_PORT`. Chỉ để gỡ lỗi — xem log thì dùng Grafana |
@@ -68,6 +69,9 @@ Tắt: `docker compose down` (giữ dữ liệu) · Xoá sạch cả dữ liệu
 | `8081` | Nginx stub_status    | Không            | 〃 (cho nginx-exporter đọc) |
 | `9113` | nginx-exporter       | Không            | 〃 |
 | `9104` | mysqld-exporter      | Không            | 〃 |
+| `9100` | node-exporter        | Không            | 〃 (số đo máy chủ, mục 7.10) |
+| `9093` | Alertmanager         | Chỉ `localhost`  | Xem cảnh báo đang gửi, tạm tắt mail (mục 7.14) |
+| `8025` | mailpit (hộp thư test) | Chỉ `localhost` | Chỉ có khi bật `--profile mail-test` |
 
 **Bạn của bạn `git pull` về có cần chỉnh port không?**
 
@@ -76,7 +80,7 @@ Tắt: `docker compose down` (giữ dữ liệu) · Xoá sạch cả dữ liệu
   - Máy bạn ấy **trống port 8080** → không cần làm gì.
   - Máy bạn ấy **đã có app chiếm 8080** → mở `.env` của bạn ấy, đổi ví dụ `HTTP_PORT=8088`, rồi vào web ở <http://localhost:8088>.
 - Việc đổi port chỉ ảnh hưởng **máy đó**, không ảnh hưởng người khác, không cần commit gì.
-- Các port nội bộ (3000, 3306, 8081, 9113, 9104) **không bao giờ cần đổi**, vì chúng không chiếm cửa của máy thật.
+- Các port nội bộ (3000, 3306, 8081, 9113, 9104, 9100) **không bao giờ cần đổi**, vì chúng không chiếm cửa của máy thật.
 - Nếu port `9090` bị trùng: sửa dòng `"127.0.0.1:9090:9090"` trong `docker-compose.yml` thành ví dụ `"127.0.0.1:9091:9090"` (chỉ đổi số **bên trái**).
 
 ---
@@ -333,7 +337,7 @@ Số liệu trả lời *"có bao nhiêu"*, log trả lời *"là gì / vì sao"
 
 | Thành phần | Container riêng | Làm gì |
 | ---------- | --------------- | ------ |
-| **Alloy**  | `ecommerce-alloy` | Đọc log mọi container qua `/var/run/docker.sock` (mount **read-only**), parse, gắn nhãn, **đẩy** sang Loki |
+| **Alloy**  | `ecommerce-alloy` | Đọc log mọi container qua `/var/run/docker.sock` (cần quyền cao, xem #31), parse, gắn nhãn, **đẩy** sang Loki |
 | **Loki**   | `ecommerce-loki`  | Lưu log, giữ 7 ngày (`LOKI_RETENTION_PERIOD`), trả lời **LogQL** |
 | **Grafana**| `ecommerce-grafana` | Đã có sẵn — thêm datasource Loki và dashboard **Shop Logs** |
 
@@ -588,7 +592,7 @@ Phần chú thích commit đó thêm vào `docker-compose.yml` và `nginx/defaul
 | Thêm gì | File |
 | ------- | ---- |
 | Container `loki` (`grafana/loki:3.7.6`) — single binary, TSDB schema v13, giữ 7 ngày, giới hạn tốc độ nhận log, chỉ mở `localhost:3100` | `loki/loki-config.yml`, `docker-compose.yml` |
-| Container `alloy` (`grafana/alloy:v1.20.1`) — gom log qua docker socket (mount **read-only**), parse riêng cho từng service, chuẩn hoá `level`, đẩy sang Loki | `alloy/config.alloy`, `docker-compose.yml` |
+| Container `alloy` (`grafana/alloy:v1.20.1`) — gom log qua docker socket (xem lưu ý bảo mật #31), parse riêng cho từng service, chuẩn hoá `level`, đẩy sang Loki | `alloy/config.alloy`, `docker-compose.yml` |
 | Backend xuất **log JSON có cấu trúc**, 1 dòng/request, kèm `route`/`status`/`duration_ms`; `/health` + `/metrics` hạ xuống mức `debug` để không nhiễu | `backend/src/logger.js`, `backend/src/server.js`, `backend/src/db.js` |
 | Nginx đổi access log sang **JSON** (`log_format json_access`) để parse được thành field | `nginx/default.conf` |
 | Grafana thêm datasource **Loki** và dashboard **Shop Logs** (18 ô, 3 ô lọc, 4 hàng) | `grafana/provisioning/datasources/loki.yml`, `grafana/dashboards/shop-logs.json` |
@@ -646,7 +650,7 @@ Hai dòng cuối là điều đáng chú ý nhất: **đúng một dòng log cho
 
 Lý do không quá tải: database chỉ có **6 sản phẩm**, mọi truy vấn đều là tra cứu theo khoá chính nên xong trong khoảng 1ms. Pool 10 kết nối quay vòng quá nhanh nên chưa bao giờ phải xếp hàng. Kịch bản k6 còn có `sleep(0.3)` giữa các lần gọi, nên 120 khách chỉ tạo ra ~200–290 request/giây.
 
-Kết luận thật thà: bài test này **chứng minh được metric và log đo đúng** (lệch 0%), nhưng **chưa chứng minh được hệ thống hành xử thế nào khi thật sự quá tải**. Muốn thấy quá tải cần bỏ `sleep`, tăng số khách lên nhiều lần, hoặc tạo dữ liệu lớn hơn để truy vấn trở nên đắt. Ngoài ra để thấy **CPU/RAM của cả máy** (chứ không chỉ của tiến trình backend) thì phải thêm `node-exporter` — hiện tại Prometheus **chưa có** metric nào thuộc nhóm `node_*` hay `container_*`.
+Kết luận thật thà: bài test này **chứng minh được metric và log đo đúng** (lệch 0%), nhưng **chưa chứng minh được hệ thống hành xử thế nào khi thật sự quá tải**. Muốn thấy quá tải cần bỏ `sleep`, tăng số khách lên nhiều lần, hoặc tạo dữ liệu lớn hơn để truy vấn trở nên đắt. Ngoài ra để thấy **CPU/RAM của cả máy** (chứ không chỉ của tiến trình backend) thì phải thêm `node-exporter` — lúc làm bài test này Prometheus **chưa có** metric nào thuộc nhóm `node_*` hay `container_*` (node-exporter đã được thêm sau, ở mục 7.10).
 
 ### 7.8. Đã biết nhưng **chưa** xử lý (ngoài phạm vi monitoring)
 
@@ -655,7 +659,345 @@ Kết luận thật thà: bài test này **chứng minh được metric và log 
 | `POST /api/products` (thêm sản phẩm) **không cần đăng nhập** | Ai vào được web cũng thêm được sản phẩm | Thêm xác thực admin, hoặc chặn route này ở nginx khi lên production |
 | Không giới hạn tần suất gọi API (rate limit) | Có thể bị spam đặt đơn | `limit_req` ở nginx |
 | `cors()` cho phép mọi domain | Không cần thiết vì frontend và API cùng domain qua nginx | Bỏ hoặc giới hạn domain khi có domain thật |
-| Chưa có HTTPS | Dữ liệu đi dạng rõ | Làm khi lên server có domain |
+| Chưa có HTTPS | Dữ liệu đi dạng rõ | **Đã chuẩn bị** chế độ HTTPS bằng Let's Encrypt cho EC2 (mục 7.10). Local vẫn là HTTP |
+
+### 7.9. Rà soát lại tầng log trước khi merge (13/10/2026)
+
+Soát lại commit "Add log pipeline: Alloy + Loki" theo 2 tiêu chí: **logic có đúng không** và **có đạt chuẩn production không**. Không có lỗi nào làm hệ thống sập. Tìm ra 6 chỗ cần sửa:
+
+| # | Vấn đề phát hiện | Hậu quả | Đã sửa thành | File |
+| - | ---------------- | ------- | ------------ | ---- |
+| 28 | **Dòng `[notice]` của nginx bị gắn nhãn `level=error`.** Template của Alloy coi mọi dòng error log của nginx (có `[mức]` trong ngoặc vuông) là `error`, kể cả `[notice]` | Mỗi lần nginx khởi động in ra vài dòng `[notice] start worker process` → ô **"Dòng ERROR"** trên dashboard Shop Logs tăng vọt dù không có lỗi gì. Lúc test, 1 lần restart nginx tạo ra 10 "lỗi" giả | Ánh xạ đúng theo mức: `[notice]` → `info`, `[warn]` → `warn`, `[error]`/`[crit]`/`[alert]`/`[emerg]` → `error`. Đã test: restart nginx, toàn bộ dòng `[notice]` mang nhãn `info` | `alloy/config.alloy` |
+| 29 | **Log backend không ghi được IP thật của khách.** Backend đứng sau nginx nên mọi kết nối đến backend đều từ container nginx. Express mặc định không đọc header `X-Forwarded-For` mà nginx gửi kèm | Mọi dòng log backend đều có `ip` là IP nội bộ của nginx (ví dụ `172.18.0.8`) → không biết khách nào gây lỗi, không truy được ai spam | Thêm `app.set('trust proxy', 1)`: tin **đúng 1 lớp proxy** (nginx). Express lấy IP mà nginx tự ghi vào cuối `X-Forwarded-For` và bỏ qua phần khách tự gửi lên, nên khách **không giả mạo** IP được. (Lúc đầu thử `'loopback, uniquelocal'` thì bị giả mạo được khi chạy trên Docker Desktop, vì IP của khách khi đó cũng là IP nội bộ — đã test và đổi sang `1`) | `backend/src/server.js` |
+| 30 | **Log backend ghi cả query string.** Trường `path` dùng `req.originalUrl` (ví dụ `/api/orders?email=a@b.com`), trong khi nginx đã cố ý dùng `$uri` để **bỏ** query string | Hai nơi làm ngược nhau; nếu sau này có API nhận email/token qua query string thì dữ liệu nhạy cảm nằm trong Loki 7 ngày, ai xem được Grafana đều đọc được | Cắt bỏ phần sau dấu `?`: `req.originalUrl.split('?')[0]` — giờ log backend và log nginx cùng một quy tắc | `backend/src/logger.js` |
+| 31 | **Comment sai về an toàn của docker socket.** Comment cũ nói mount `docker.sock:ro` thì Alloy "chỉ đọc được, không điều khiển Docker" | Hiểu sai rủi ro. `:ro` chỉ chặn ghi vào **file** socket, **không** chặn lệnh gửi **qua** socket: container có socket vẫn tạo/xoá container, mount ổ đĩa host được = **quyền root trên máy** | Sửa comment và README cho đúng. Giữ nguyên cách chạy vì chấp nhận được cho demo. Ghi chú hướng production: đặt một **docker-socket-proxy** ở giữa, chỉ mở API đọc (containers, events, logs) | `docker-compose.yml`, `README.md` |
+| 32 | **Crash của backend bị cắt thành nhiều dòng log.** Khi có lỗi không ai bắt, Node in stack trace ra nhiều dòng thường (không phải JSON) | Loki lưu mỗi dòng của stack trace thành một bản ghi riêng, mức `info` → khó đọc, và lỗi crash **không** hiện trong ô "Dòng ERROR" | Bắt `uncaughtException` và `unhandledRejection`, ghi thành **một** dòng JSON mức `error` kèm `stack`, rồi thoát để Docker tự bật lại container (`restart: unless-stopped`). Riêng lỗi xảy ra **trước** khi logger được nạp (ví dụ thiếu thư viện lúc khởi động) thì vẫn là nhiều dòng — trường hợp này hiếm và nhìn `docker compose logs backend` là thấy ngay | `backend/src/server.js` |
+| 33 | **Thời gian truy vấn log ghi cứng `168h`.** `max_query_lookback` không đi theo biến `LOKI_RETENTION_PERIOD` | Nếu tăng thời gian giữ log lên 30 ngày trong `.env` mà quên sửa dòng này, Grafana vẫn chỉ xem được 7 ngày gần nhất dù dữ liệu cũ vẫn còn trên ổ đĩa | Dùng chung biến: `max_query_lookback: ${LOKI_RETENTION_PERIOD}`. Đổi 1 chỗ trong `.env` là cả 2 cùng đổi | `loki/loki-config.yml` |
+
+**Đã kiểm tra lại sau khi sửa** (chạy đủ 10 container):
+
+- Restart nginx: toàn bộ dòng `[notice]` mang nhãn `level=info`, không còn `error` giả (#28).
+- Gửi request kèm header giả `X-Forwarded-For: 6.6.6.6`: log backend vẫn ghi IP thật mà nginx thấy, **không** bị giả mạo (#29).
+- Gọi `/api/orders/998?email=x`: log backend ghi `path: "/api/orders/998"`, không còn query string (#30).
+- Cố ý ném lỗi không ai bắt trong backend: log ra **một** dòng JSON `level=error`, `msg=uncaught_exception`, có đủ `stack` (#32).
+- Loki khởi động bình thường, `/config` cho thấy `max_query_lookback` = `retention_period` = 7 ngày (#33).
+- Prometheus vẫn đủ 4 target `UP`; dashboard Shop Overview và Shop Logs chạy bình thường.
+- Lưu ý khi chạy trên **Docker Desktop (Windows)**: IP trong log sẽ là IP cổng mạng nội bộ của Docker (dạng `172.x.x.1`), vì Docker Desktop đứng giữa máy bạn và container. Lên server Linux thật thì sẽ thấy IP thật của khách.
+
+### 7.10. Thêm node-exporter (số đo máy chủ) và HTTPS bằng Let's Encrypt (14/10/2026)
+
+Hai việc chuẩn bị cho lúc đưa lên EC2. Theo thoả thuận: **chưa** làm backup MySQL, tách máy monitoring, chạy nhiều bản (ở quy mô localhost chưa cần); **không** dùng CloudWatch.
+
+| # | Thêm gì | Vì sao | Làm ra sao | File |
+| - | ------- | ------ | ---------- | ---- |
+| 34 | **node-exporter**: đo CPU, RAM, ổ đĩa, mạng của **cả máy chủ** | Trước đây chỉ đo từng ứng dụng (backend, nginx, MySQL). Nếu cả máy hết RAM hay đầy ổ đĩa thì MySQL, Loki, Prometheus chết theo mà dashboard không báo trước. EC2 tự có biểu đồ CPU, nhưng **không có RAM và ổ đĩa còn trống** nếu không cài thêm agent, nên đo từ bên trong máy là cách đơn giản nhất | Thêm service `node-exporter` (đọc ổ đĩa máy chủ ở chế độ **chỉ đọc**, không mở cổng ra ngoài). Prometheus thêm job `node` đọc `node-exporter:9100`. Dashboard Shop Overview thêm hàng **"Máy chủ (node-exporter)"**: 4 ô (còn sống, CPU %, RAM %, ổ đĩa %) và 3 biểu đồ theo thời gian; vàng từ 80%, đỏ từ 90% | `docker-compose.yml`, `prometheus/prometheus.yml`, `grafana/dashboards/shop-overview.json` |
+| 35 | **HTTPS** bằng chứng chỉ miễn phí của **Let's Encrypt** (chế độ riêng cho EC2) | Lead yêu cầu sản phẩm trên EC2 phải có HTTPS. Không có HTTPS thì mật khẩu, email, đơn hàng đi trên mạng dạng chữ rõ, ai đứng giữa đường cũng đọc được; trình duyệt còn gắn nhãn "Not secure" | Thêm **chế độ HTTPS** tách riêng, local vẫn chạy HTTP như cũ (xem giải thích bên dưới) | `nginx/https.conf`, `nginx/snippets/*`, `docker-compose.https.yml`, `certbot/www/`, `.env.example` |
+| 36 | **Tách cấu hình nginx** thành phần chung + 2 chế độ | Cấu hình HTTP và HTTPS dùng chung toàn bộ đường đi (API, `/health`, chặn `/metrics`, frontend). Chép 2 bản thì sau này sửa một bản quên bản kia | Phần chung đưa vào `nginx/snippets/` (`common-http.conf`: log JSON + stub_status; `app-locations.conf`: các đường đi; `acme.conf`: đường xác minh của Let's Encrypt). `default.conf` (HTTP) và `https.conf` (HTTPS) chỉ còn vài dòng `include` | `nginx/` |
+
+**node-exporter — cần biết khi đọc số:**
+
+- Trên **EC2** (Linux thật) nó đo đúng chính con EC2 đó.
+- Trên **Docker Desktop (Windows)** Docker chạy trong một máy ảo Linux, nên node-exporter đo **máy ảo đó**, không phải Windows. Số trên dashboard sẽ khác Task Manager, đó là bình thường.
+- RAM tính theo `MemAvailable` (RAM còn cấp được cho chương trình), không theo `MemFree`, vì Linux hay dùng RAM rảnh làm bộ nhớ đệm; tính theo `MemFree` thì lúc nào cũng thấy gần đầy.
+- Ổ đĩa chỉ xem ổ gốc `/`, nơi chứa dữ liệu Docker (MySQL, Loki, Prometheus đều nằm ở đây).
+
+**HTTPS — hoạt động thế nào (bức tranh lớn):**
+
+```
+Trình duyệt ──http://──►  nginx :80  ──► 301 chuyển sang https://   (trừ đường /.well-known/acme-challenge/)
+Trình duyệt ──https://─►  nginx :443 ──► giải mã bằng chứng chỉ ──► frontend / backend như cũ
+
+certbot ── xin / gia hạn chứng chỉ ──► Let's Encrypt
+Let's Encrypt ── gọi http://<domain>/.well-known/acme-challenge/<mã> ──► nginx :80 trả file mã do certbot để sẵn
+```
+
+- **Let's Encrypt** cấp chứng chỉ miễn phí, nhưng phải chứng minh bạn giữ domain: nó gọi vào domain qua **cổng 80** để lấy một file mã. Vì vậy cổng 80 luôn phải mở, kể cả sau khi đã có HTTPS.
+- Chứng chỉ chỉ sống **90 ngày**. Container `certbot` cứ 12 tiếng hỏi "sắp hết hạn chưa?", còn dưới 30 ngày thì tự gia hạn. nginx cứ 6 tiếng tự nạp lại để dùng chứng chỉ mới (không làm rớt kết nối).
+- Chứng chỉ và khoá bí mật nằm trong **volume Docker `letsencrypt`**, không nằm trong thư mục code, nên không thể lỡ tay commit lên git.
+- Chỉ cho phép TLS 1.2 và 1.3. Có thêm header **HSTS** ("từ giờ chỉ vào bằng HTTPS"), để ngắn 1 ngày lúc mới bật; chạy ổn vài tuần rồi mới tăng lên 1 năm trong `nginx/https.conf`.
+- Backend không phải sửa gì: nginx giải mã xong mới chuyển vào trong, và đã báo `X-Forwarded-Proto: https` cho backend biết.
+
+**Chạy local (máy bạn): không đổi gì.** `docker compose up -d --build` như cũ, vẫn là HTTP ở cổng `HTTP_PORT`. Không dùng `docker-compose.https.yml` ở local vì localhost không xin được chứng chỉ Let's Encrypt.
+
+**Các bước bật HTTPS trên EC2 (làm 1 lần):**
+
+1. Cần có **domain** (hỏi lead) và trỏ bản ghi DNS **A** của domain về **IP public** của EC2 (nên dùng Elastic IP để IP không đổi khi tắt/bật máy).
+2. **Security group** của EC2 mở cổng **80** và **443** cho mọi nơi (`0.0.0.0/0`). Cổng 22 (SSH) chỉ mở cho IP của bạn. **Không** mở 3001, 9090, 3100, 12345.
+3. Trong `.env` trên EC2: `HTTP_PORT=80`, điền `DOMAIN=` (ví dụ `shop.congty.com`) và `LETSENCRYPT_EMAIL=` (email nhận thư nếu gia hạn lỗi).
+4. Bật ở chế độ HTTP trước (lúc này chưa có chứng chỉ nên chưa bật HTTPS được):
+   ```bash
+   docker compose up -d --build
+   ```
+5. Xin chứng chỉ lần đầu (lệnh này đọc `DOMAIN` và `LETSENCRYPT_EMAIL` từ `.env`):
+   ```bash
+   set -a; . ./.env; set +a
+   docker compose -f docker-compose.yml -f docker-compose.https.yml run --rm --entrypoint certbot certbot \
+     certonly --webroot -w /var/www/certbot --cert-name app \
+     -d "$DOMAIN" --email "$LETSENCRYPT_EMAIL" --agree-tos --no-eff-email
+   ```
+   Thấy `Successfully received certificate` là xong. Muốn thử trước cho chắc thì thêm `--staging` (chứng chỉ thử, trình duyệt sẽ báo không tin cậy), thành công rồi chạy lại không có `--staging`. Let's Encrypt giới hạn số lần xin, nên đừng chạy lệnh thật nhiều lần liền.
+6. Chuyển sang chế độ HTTPS (từ giờ luôn bật bằng lệnh này trên EC2):
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.https.yml up -d
+   ```
+7. Kiểm tra: mở `http://<domain>` phải tự nhảy sang `https://<domain>` có ổ khoá; `docker compose -f docker-compose.yml -f docker-compose.https.yml ps` thấy thêm container `ecommerce-certbot`.
+
+Grafana và Prometheus **vẫn chỉ mở trên localhost** của EC2 như cũ. Muốn xem từ máy bạn thì dùng SSH tunnel: `ssh -L 3001:127.0.0.1:3001 ubuntu@<IP-EC2>` rồi mở <http://localhost:3001>.
+
+**Đã kiểm tra trên bản sao (cloud):**
+
+- Chế độ HTTP (local): web và API trả 200, đường `/.well-known/acme-challenge/` trả đúng file, Prometheus đủ **5** target `UP` (thêm `node`).
+- node-exporter: CPU, RAM, ổ đĩa đều ra số; 8 ô mới trên dashboard được Grafana nạp và truy vấn ra số.
+- Chế độ HTTPS (dùng chứng chỉ **tự ký** thay cho chứng chỉ thật): `http://` trả **301** sang `https://` và giữ nguyên đường dẫn; đường xác minh vẫn đi được qua HTTP; qua HTTPS web, API, `/health` trả 200, `/metrics` vẫn 404; chạy HTTP/2, TLS 1.3; có header HSTS; vòng nạp lại của nginx và vòng gia hạn của certbot đều đang chạy.
+- **Chưa** kiểm tra được bước xin chứng chỉ thật từ Let's Encrypt (bước 5), vì việc này cần domain thật trỏ về một máy có IP public. Lần đầu làm trên EC2 nên chạy với `--staging` trước.
+
+### 7.11. Luật cảnh báo cho Prometheus (14/10/2026)
+
+| # | Thêm gì | Vì sao | Làm ra sao | File |
+| - | ------- | ------ | ---------- | ---- |
+| 37 | **10 luật cảnh báo** chia 3 nhóm: có gì chết không, khách có bị lỗi hay chậm không, máy chủ còn đủ sức không | Trước đây phải **ngồi nhìn** dashboard mới biết có sự cố. Luật cảnh báo cho Prometheus **tự** kiểm tra mỗi 15 giây và bật đèn khi có chuyện | Thêm file luật, cho Prometheus đọc qua `rule_files`, mount thư mục `prometheus/rules` vào container | `prometheus/rules/alerts.yml`, `prometheus/prometheus.yml`, `docker-compose.yml` |
+
+**Danh sách luật** (ngưỡng nào cũng sửa được trong `alerts.yml`):
+
+| Nhóm | Luật | Khi nào bật | Chờ bao lâu | Mức |
+| ---- | ---- | ----------- | ----------- | --- |
+| Sống/chết | `TargetDown` | Prometheus gọi một target không được | 1 phút | critical |
+| | `NginxDown` | nginx-exporter không đọc được nginx | 1 phút | critical |
+| | `MySQLDown` | mysqld-exporter không đăng nhập được MySQL | 1 phút | critical |
+| Ứng dụng | `High5xxRate` | Hơn 5% request bị lỗi 5xx (chỉ tính khi có trên 0,1 request/giây) | 1 phút | critical |
+| | `HighLatencyP95` | 5% request chậm nhất mất hơn 1 giây | 1 phút | warning |
+| | `MySQLTooManyConnections` | Dùng quá 80% số kết nối tối đa của MySQL | 1 phút | warning |
+| Máy chủ | `HostHighCpu` | CPU trên 90% | 1 phút | warning |
+| | `HostHighMemory` | RAM trên 90% | 1 phút | warning |
+| | `HostDiskAlmostFull` | Ổ đĩa `/` trên 85% | 1 phút | warning |
+| | `HostDiskFull` | Ổ đĩa `/` trên 95% | 1 phút | critical |
+
+**Cần biết khi đọc:**
+
+- Mỗi luật có 3 trạng thái: **inactive** (bình thường), **pending** (điều kiện đã đúng nhưng chưa đủ thời gian chờ), **firing** (đã đúng đủ lâu, đây là cảnh báo thật). Thời gian chờ (`for`) để không báo nhầm vì một cú tăng vọt vài giây.
+- **critical** = hỏng thật, xử lý ngay. **warning** = sắp có chuyện, xem trong ngày.
+- Mỗi cảnh báo có `summary` (chuyện gì) và `description` (nên kiểm tra gì trước), viết bằng tiếng Việt.
+- Xem ở đâu: <http://localhost:9090/alerts>, hoặc trong Grafana: **Alerting → Alert rules** (Grafana tự đọc luật từ Prometheus, chỉ xem, không sửa ở đó).
+- **Gửi đi đâu?** Prometheus chỉ *phát hiện*. Việc nhắn đi do **Alertmanager** làm, đã thêm ở mục 7.14 (mail) và 7.15 (Telegram): chỉ cần thêm phần `alerting:` vào `prometheus.yml`, các luật này giữ nguyên.
+
+**Đã kiểm tra trên bản sao (cloud):**
+
+- `promtool check rules`: 10 luật đúng cú pháp; `promtool check config`: `prometheus.yml` hợp lệ.
+- Chạy thử luật bằng dữ liệu giả (`promtool test rules`): `TargetDown`, `MySQLDown`, `High5xxRate` (10% lỗi), `HostHighMemory` (RAM 95%) đều bật đúng lúc và đúng nhãn; `HostDiskAlmostFull` không bật khi ổ đĩa mới 50%.
+- Diễn tập thật: `docker compose stop db` → `MySQLDown` chuyển **firing** sau khoảng 70 giây; `docker compose start db` → tự hết cảnh báo.
+- Grafana đọc được danh sách luật từ Prometheus.
+
+**Tự diễn tập trên máy bạn:** `docker compose stop db`, mở <http://localhost:9090/alerts>, đợi khoảng 1-2 phút sẽ thấy `MySQLDown` từ vàng (pending) sang đỏ (firing). Xong thì `docker compose start db`.
+
+### 7.12. Giả lập quá tải: dồn traffic và ép CPU/RAM máy chủ (14/10/2026)
+
+| # | Thêm gì | Vì sao | File |
+| - | ------- | ------ | ---- |
+| 38 | Kịch bản k6 **quá tải** `overload.js`: 300 khách ảo gọi liên tục không nghỉ, 30% là đặt hàng, giữ tải 16 phút (có thể rút ngắn bằng `-e HOLD=3m`, luật demo chỉ cần ~2 phút) | `load.js` (mục 7.7) quá nhẹ, không làm web "đau". Muốn xem dashboard và luật cảnh báo phản ứng thì cần tải nặng và **đủ lâu** (luật CPU, độ trễ chờ 10 phút) | `loadtest/overload.js` |
+
+Có **2 kiểu** quá tải, kết quả khác nhau, nên làm cả hai:
+
+**Kiểu 1: dồn traffic vào web (k6).** Giống ngày khuyến mãi khách vào ồ ạt.
+
+```powershell
+docker run --rm --network tool-monitoring_appnet -v "${PWD}/loadtest:/scripts:ro" grafana/k6:0.54.0 run /scripts/overload.js
+```
+
+Muốn nặng hơn hoặc ngắn hơn: thêm `-e VUS=500 -e HOLD=5m` ngay trước `grafana/k6:0.54.0`. Dừng giữa chừng: `Ctrl+C`.
+
+**Kiểu 2: ép thẳng CPU và RAM của máy chủ (stress-ng).** Giống một chương trình khác trên cùng máy bị lỗi, ăn hết tài nguyên.
+
+```powershell
+docker run --rm --name stress alexeiled/stress-ng:0.12.05 --cpu 0 --vm 2 --vm-bytes 100% --vm-keep --timeout 20m
+```
+
+- `--cpu 0`: chạy hết **mọi** nhân CPU. `--vm 2 --vm-bytes 100%`: chiếm gần hết RAM còn trống. `--timeout 20m`: tự dừng sau 20 phút.
+- Luật đang ở **chế độ demo** (mục 7.13): CPU 100% khoảng 2 phút là `HostHighCpu` đỏ, RAM đỏ sau khoảng 2-3 phút (cần thêm ~1 phút để stress-ng chiếm đủ RAM). Không cần chạy hết 20 phút; thấy đỏ rồi thì `Ctrl+C`.
+- Dừng sớm: `Ctrl+C`, hoặc mở PowerShell khác chạy `docker stop stress`. Tắt là RAM và CPU trả lại ngay.
+- Chỉ ảnh hưởng **máy ảo Docker**, không làm treo Windows, vì máy ảo bị giới hạn RAM sẵn. Nhưng trong lúc chạy máy có thể chậm; nên đóng bớt app nặng.
+
+**Kết quả đo trên bản sao (cloud, máy ảo 4 nhân, 15,7 GB RAM):**
+
+| | Kiểu 1: k6 300 khách | Kiểu 2: stress-ng |
+| - | -------------------- | ----------------- |
+| CPU máy chủ | 90-95% (riêng k6 cũng ăn CPU vì chạy cùng máy) | 100% |
+| RAM máy chủ | ~10%, gần như **không đổi** | 93% sau khoảng 1 phút |
+| Request/giây | ~800 | (không có traffic) |
+| Thời gian phản hồi phía khách (k6 đo) | p95 = 0,53 giây | |
+| Thời gian phản hồi phía backend (Prometheus đo) | p95 = 0,02-0,05 giây | |
+| Luật cảnh báo | `HostHighCpu` pending (cần giữ đủ 10 phút mới firing) | `HostHighCpu`, `HostHighMemory` pending rồi firing nếu giữ đủ lâu |
+| Container nào bị chết? | Không | Không |
+
+**Rút ra kinh nghiệm:**
+
+- **Traffic web gần như không làm tăng RAM.** Web này nhẹ (6 sản phẩm), nên quá tải traffic chỉ thấy ở CPU và thời gian phản hồi. Muốn thấy luật RAM chạy thì phải dùng kiểu 2.
+- **Máy nhiều nhân thì khó đỏ CPU bằng traffic.** Backend Node.js chỉ dùng **1 nhân** (backend CPU tối đa khoảng 0,7 nhân trong test). Máy bạn có 16 nhân nên k6 có thể chỉ đẩy CPU máy chủ lên khoảng 20-40% (đoán, chưa đo trên máy bạn). Trên EC2 nhỏ (2 nhân) thì đỏ rất nhanh.
+- **Backend đo mình nhanh, khách thấy chậm.** Backend chỉ tính từ lúc nó *bắt đầu* xử lý, không tính thời gian request *xếp hàng chờ*. Vì vậy `HighLatencyP95` (dựa trên số của backend) **không** bật dù khách chờ 0,5 giây. Đây là giới hạn đã biết; muốn đo đúng trải nghiệm khách thì phải lấy thời gian từ log nginx (`request_time` trong Loki).
+- `http_req_failed` của k6 báo khoảng 30% "lỗi" nhưng `checks` 100%: đó là đơn hàng trả **409** (hết hàng) sau khi bán hết kho, là hành vi đúng chứ không phải lỗi máy chủ.
+
+**Cách xem:** mở song song Grafana **Shop Overview** (`Last 15 minutes`, tự làm mới `5s`, kéo xuống hàng "Máy chủ") và <http://localhost:9090/alerts>.
+
+### 7.13. Luật cảnh báo chế độ demo + bảng cảnh báo tự cập nhật trên Grafana (14/10/2026)
+
+| # | Sửa gì | Vì sao | Làm ra sao | File |
+| - | ------ | ------ | ---------- | ---- |
+| 39 | **Mọi luật đỏ sau khoảng 1-2 phút** | Bản đầu dùng số trung bình 5 phút và chờ 5-10 phút: chuẩn production nhưng test rất lâu (CPU cần ~15 phút mới đỏ) | Tất cả luật đổi sang số liệu **1 phút gần nhất** (`[1m]`) và chờ **1 phút** (`for: 1m`). Ghi chú trong `alerts.yml` cách nới ra khi lên production | `prometheus/rules/alerts.yml` |
+| 40 | **Bảng "Luật đang bị phạm"** ở đầu dashboard Shop Overview | Trang `/alerts` của Prometheus **không tự làm mới**, phải F5 mới thấy thay đổi. Prometheus không có tuỳ chọn bật tự làm mới cho trang này | Prometheus tự tạo một series tên `ALERTS` cho mỗi luật đang pending/firing. Bảng mới hỏi `ALERTS{alertstate=~"pending\|firing"}`; dashboard đặt tự làm mới **5 giây**. Đỏ = FIRING, cam = PENDING; trống = mọi thứ bình thường | `grafana/dashboards/shop-overview.json` |
+
+**Lưu ý khi lên production:** đặt `for: 1m` trên số 1 phút thì một cú tăng CPU ngắn (ví dụ lúc build image) cũng đủ báo. Báo quá nhiều thì người trực sẽ quen và bỏ qua, nên trước khi gắn Alertmanager gửi tin thật thì nới lại theo ghi chú ở đầu `alerts.yml`.
+
+**Đã kiểm tra trên bản sao:** cùng lúc tắt MySQL và chạy stress-ng. `MySQLDown` đỏ sau ~1,5 phút, `HostHighCpu` đỏ sau ~2 phút, `HostHighMemory` đỏ sau ~2,7 phút. Bảng trên Grafana hiện đúng các luật đó và tự đổi PENDING → FIRING mà không cần F5.
+
+### 7.14. Alertmanager: gửi mail cảnh báo theo mẫu (14/10/2026)
+
+| # | Thêm gì | Vì sao | File |
+| - | ------- | ------ | ---- |
+| 41 | **Alertmanager** nhận cảnh báo FIRING từ Prometheus, gom nhóm, gửi **mail** | Trước đây phải mở Grafana mới biết có sự cố. Giờ sự cố tự báo tới hộp thư | `alertmanager/alertmanager.yml`, `alertmanager/entrypoint.sh`, `docker-compose.yml`, `prometheus/prometheus.yml` |
+| 42 | **Mẫu mail** tiếng Việt, cố định | Mail nào cũng cùng một khuôn để đọc nhanh: tiêu đề cho biết sự cố hay đã khắc phục, mức độ, tên luật; thân mail là bảng: sự cố, trạng thái, giờ bắt đầu/kết thúc (giờ Việt Nam), nơi bị, nên làm gì | `alertmanager/templates/email.tmpl` |
+| 43 | **mailpit**: hộp thư giả để test, không cần Gmail | Thử mail mà không phải dùng tài khoản thật; xem mail trên web <http://localhost:8025> | `docker-compose.yml` (profile `mail-test`) |
+
+**Đường đi của một cảnh báo:**
+
+```
+Prometheus (luật FIRING) ──► Alertmanager :9093 ──► gom nhóm 10s ──► SMTP (Gmail / mailpit) ──► hộp thư
+                                   │
+                                   └─ sự cố hết ──► gửi thêm mail "ĐÃ KHẮC PHỤC"
+```
+
+**Mẫu mail:**
+
+- Tiêu đề: `[SỰ CỐ][CRITICAL] MySQLDown - Shop Demo` hoặc `[ĐÃ KHẮC PHỤC][CRITICAL] MySQLDown - Shop Demo`. Nhiều nơi cùng bị thì thêm `(3 nơi)`.
+- Đầu mail có dải màu: **đỏ** = critical, **cam** = warning, **xanh** = đã khắc phục.
+- Thân mail, mỗi nơi bị một bảng: Sự cố · Trạng thái · Bắt đầu lúc · Kết thúc lúc (chỉ khi đã hết) · Nơi bị · Nên làm gì. Nội dung lấy từ `summary` và `description` của luật trong `prometheus/rules/alerts.yml`, nên sửa chữ ở đó là mail đổi theo.
+- Đổi màu, đổi bố cục: sửa `alertmanager/templates/email.tmpl` rồi `docker compose restart alertmanager`.
+
+**Nhịp gửi** (trong `alertmanager.yml`): gom các cảnh báo cùng tên luật vào **1 mail**; chờ 10 giây để gom; có thêm nơi bị thì gửi cập nhật sau 1 phút; sự cố chưa hết thì **nhắc lại mỗi 1 tiếng** (không gửi mỗi phút). Ổ đĩa đầy (`HostDiskFull`) đang bật thì không gửi thêm mail "sắp đầy"; MySQL chết thì không gửi thêm mail "nhiều kết nối".
+
+**Cài đặt:** mail là **tuỳ chọn** (từ mục 7.15 có thêm Telegram; phải bật ít nhất 1 trong 2 kênh, nếu không Alertmanager báo lỗi và không chạy). Muốn dùng mail thì thêm các dòng sau vào `.env` (có mẫu trong `.env.example`).
+
+*Cách A: test bằng hộp thư giả mailpit (không cần tài khoản, nên làm trước):*
+
+```
+SMTP_HOST=mailpit:1025
+SMTP_FROM=canhbao@shopdemo.local
+SMTP_USERNAME=
+SMTP_PASSWORD=
+SMTP_REQUIRE_TLS=false
+ALERT_EMAIL_TO=ban@example.com
+```
+
+```powershell
+docker compose --profile mail-test up -d
+docker compose stop db      # khoảng 1,5 phút sau mail SỰ CỐ tới
+docker compose start db     # khoảng 1 phút sau mail ĐÃ KHẮC PHỤC tới
+```
+
+Mở <http://localhost:8025> để xem mail.
+
+*Cách B: gửi thật qua Gmail:*
+
+1. Tài khoản Gmail dùng để **gửi** phải bật **Xác minh 2 bước**.
+2. Vào <https://myaccount.google.com/apppasswords>, tạo một **App password** (16 ký tự). Đây **không phải** mật khẩu đăng nhập Gmail; Gmail không cho Alertmanager đăng nhập bằng mật khẩu thường.
+3. Trong `.env`:
+   ```
+   SMTP_HOST=smtp.gmail.com:587
+   SMTP_FROM=ban@gmail.com
+   SMTP_USERNAME=ban@gmail.com
+   SMTP_PASSWORD=<app password 16 ký tự, viết liền không dấu cách>
+   SMTP_REQUIRE_TLS=true
+   ALERT_EMAIL_TO=ban@gmail.com,lead@congty.com
+   ```
+4. `docker compose up -d` (hoặc `docker compose up -d --force-recreate alertmanager` nếu đã chạy). Thử bằng `docker compose stop db`.
+
+**Gỡ lỗi khi không thấy mail:**
+
+- `docker compose logs alertmanager --tail 30`: dòng `Chưa đặt SMTP_... trong .env` = thiếu biến; `535 ... Username and Password not accepted` = sai App password; `dial tcp ... timeout` = mạng chặn cổng 587.
+- <http://localhost:9093>: giao diện Alertmanager, xem cảnh báo nó đang giữ. Không thấy gì ở đây mà trang /alerts của Prometheus đang đỏ = Prometheus chưa nối được Alertmanager (xem <http://localhost:9090/targets>, job `alertmanager`).
+- Mail Gmail có thể rơi vào mục **Spam** lần đầu.
+- Tạm tắt mail khi bảo trì: trên <http://localhost:9093> bấm **New Silence**, chọn luật và thời gian.
+
+**Bảo mật:** mật khẩu mail chỉ nằm trong `.env` (không lên git) và một file tạm trong container; không nằm trong `alertmanager.yml`. `entrypoint.sh` điền các giá trị còn lại vào khuôn mỗi lần khởi động, vì Alertmanager không tự đọc biến môi trường.
+
+**Đã kiểm tra trên bản sao (với mailpit):** `amtool check-config` hợp lệ (cả mẫu mail); Prometheus thấy Alertmanager (target `alertmanager` UP); tắt MySQL → mail `[SỰ CỐ][CRITICAL] MySQLDown` tới sau khoảng 80 giây, gửi đúng 2 người nhận, giờ hiển thị theo giờ Việt Nam; bật lại MySQL → mail `[ĐÃ KHẮC PHỤC]` tới sau khoảng 1 phút, có cả giờ kết thúc. **Chưa** thử gửi qua Gmail thật (cần App password của bạn).
+
+### 7.15. Báo cảnh báo qua Telegram (14/10/2026)
+
+| # | Thêm gì | Vì sao | File |
+| - | ------- | ------ | ---- |
+| 44 | Kênh **Telegram** cho Alertmanager, mẫu tin nhắn giống mẫu mail | Gửi mail qua Gmail cần cấp App password của tài khoản Gmail. Telegram chỉ cần một **bot** riêng, không dính tới tài khoản cá nhân nào; tin tới điện thoại ngay | `alertmanager/alertmanager.yml`, `alertmanager/templates/telegram.tmpl`, `alertmanager/entrypoint.sh`, `docker-compose.yml`, `.env.example` |
+| 45 | **Bật/tắt từng kênh bằng `.env`** | Không phải ai cũng dùng cả mail lẫn Telegram. Có `TELEGRAM_BOT_TOKEN` thì gửi Telegram; có `SMTP_HOST` thì gửi mail; có cả hai thì gửi cả hai; không có kênh nào thì Alertmanager báo lỗi rõ ràng và không chạy | `alertmanager/entrypoint.sh` |
+
+**Mẫu tin nhắn** (cùng nội dung với mail, Telegram không có màu nên dùng biểu tượng):
+
+```
+🔴 SỰ CỐ: MySQLDown
+Mức độ: CRITICAL · 1 nơi đang bị
+━━━━━━━━━━━━━━
+Sự cố: mysqld-exporter không kết nối được MySQL
+Trạng thái: ĐANG XẢY RA
+Bắt đầu: 16:30:54 14/10/2026
+Nơi bị: mysqld-exporter:9104 (job: mysql)
+Nên làm gì: MySQL có thể đã chết, ... Kiểm tra: docker compose logs db.
+Shop Demo · Alertmanager. Chưa hết sẽ nhắc lại mỗi 1 tiếng.
+```
+
+🔴 = critical, 🟠 = warning, ✅ = đã khắc phục (kèm giờ kết thúc). Sửa mẫu ở `alertmanager/templates/telegram.tmpl` rồi `docker compose restart alertmanager`.
+
+**Cài đặt (làm 1 lần, khoảng 5 phút).** Đây là đúng các bước đã chạy thành công trên máy Windows (Docker Desktop) ngày 14/10/2026.
+
+Bot Telegram **không gửi theo số điện thoại**, mà gửi vào một **chat ID** (một con số). Vì vậy cần 2 thứ: **token** của bot và **chat ID** của bạn.
+
+1. **Tạo bot.** Trên Telegram (điện thoại hoặc máy tính), gõ vào ô **tìm kiếm** chữ `BotFather`, chọn **@BotFather** có dấu tích xanh, bấm **Start**. Gửi `/newbot`, đặt tên hiển thị (ví dụ `Shop Demo Cảnh Báo`), rồi đặt username kết thúc bằng `bot` (ví dụ `shopdemo_canhbao_bot`). BotFather trả về một **token** dạng `7123456789:AAH...` (thường dài 46 ký tự). Giữ kín token này như mật khẩu, **không** chụp màn hình hay dán lên chat. Lỡ lộ thì vào BotFather gõ `/revoke` để lấy token mới.
+2. **Nhắn cho bot.** Bấm vào link bot mà BotFather vừa đưa, bấm **Start** rồi gửi thêm một tin bất kỳ (ví dụ `hi`). Bước này bắt buộc: bot không được phép nhắn trước cho người chưa từng nhắn nó.
+3. **Lấy chat ID.** Mở trình duyệt, vào `https://api.telegram.org/bot<TOKEN>/getUpdates` (thay `<TOKEN>` bằng token, giữ chữ `bot` dính liền phía trước). Trong kết quả tìm đoạn `"chat":{"id":123456789,"first_name":"<tên bạn>",...,"type":"private"}`: con số sau `"id":` là chat ID. Mọi tin bạn nhắn cho bot đều có **cùng** chat ID này, nên nhiều dòng cũng không sao. Nếu trang chỉ hiện `{"ok":true,"result":[]}` thì quay lại bước 2 nhắn cho bot rồi tải lại trang.
+   *Mẹo:* trang này mở ra được (`"ok":true`) nghĩa là token bạn vừa dán trên thanh địa chỉ là token **đúng**; hãy copy đúng phần đó (giữa `/bot` và `/getUpdates`) vào `.env`.
+4. **Điền vào `.env`** (mỗi biến đúng **một** dòng, không dấu ngoặc kép, không dấu cách, không có chữ `bot` ở đầu token):
+   ```
+   TELEGRAM_BOT_TOKEN=7123456789:AAH...
+   TELEGRAM_CHAT_ID=123456789
+   ```
+   Không dùng mail thì để trống `SMTP_HOST=`.
+5. **Tạo lại Alertmanager để nó đọc `.env` mới:**
+   ```powershell
+   docker compose up -d --force-recreate alertmanager
+   ```
+   ⚠️ **Mỗi lần sửa `.env` đều phải chạy lệnh này.** `docker compose restart` **không** đọc lại `.env`, container vẫn giữ token cũ (đây chính là lỗi đã gặp: `.env` đúng nhưng Telegram vẫn báo `Unauthorized`).
+6. **Nếu vừa thêm Alertmanager lần đầu**, khởi động lại cả Prometheus để nó đọc phần `alerting` mới trong `prometheus.yml`, đợi khoảng 20 giây (ngay sau khi khởi động, Prometheus trả `Service Unavailable` là bình thường):
+   ```powershell
+   docker compose restart prometheus
+   ```
+7. **Thử thật:** `docker compose stop db` → khoảng 1 đến 2 phút sau tin 🔴 **MySQLDown** tới Telegram. `docker compose start db` → khoảng 1 phút sau tin ✅ **ĐÃ KHẮC PHỤC**.
+
+*Gửi vào nhóm (cả team cùng thấy):* thêm bot vào nhóm Telegram, nhắn một tin trong nhóm, làm lại bước 3: chat ID của nhóm là số **âm** (ví dụ `-1001234567890`), điền số đó (cả dấu trừ) vào `TELEGRAM_CHAT_ID`, rồi làm lại bước 5.
+
+**Không nhận được tin? Dò theo từng chặng** (Prometheus → Alertmanager → Telegram). Các lệnh dưới đây **không in token ra màn hình**, và cố ý không dùng dấu ngoặc kép bên trong vì PowerShell tự bỏ mất chúng.
+
+| Bước | Lệnh (PowerShell, chạy trong thư mục dự án) | Kết quả đúng | Nếu sai thì |
+| ---- | -------------------------------------------- | ------------ | ----------- |
+| 1. Prometheus thấy lỗi chưa | Mở http://localhost:9090/alerts | Luật (ví dụ `MySQLDown`) màu đỏ, **FIRING** | Đợi đủ 1 đến 2 phút (luật có `for: 1m`) |
+| 2. Prometheus biết Alertmanager chưa | `curl.exe -s http://localhost:9090/api/v1/alertmanagers` | Có `"url":"http://alertmanager:9093/api/v2/alerts"` | Ra `"activeAlertmanagers":[]` → Prometheus đang chạy cấu hình cũ: `docker compose restart prometheus`, đợi 20 giây |
+| 3. Alertmanager nhận được cảnh báo chưa | `curl.exe -s http://localhost:9093/api/v2/alerts` | Có `MySQLDown` | Ra `[]` → quay lại bước 2 |
+| 4. Telegram từ chối gì | `docker compose logs alertmanager --tail 30` | Dòng đầu có `Kênh Telegram: BẬT (chat_id ..., token dài 46 ký tự)`, không có `Notify for alerts failed` | `Unauthorized (401)` → **sai token** (xem bước 5, 6). `chat not found` → sai chat ID hoặc chưa bấm Start với bot. `can't parse entities` → mẫu tin có ký tự `<` `>` lạ. Timeout → mạng chặn `api.telegram.org` |
+| 5. Token trong container dài bao nhiêu | `docker compose exec alertmanager sh -c 'wc -c /tmp/telegram_token; tr -d A-Za-z0-9:_- < /tmp/telegram_token \| od -c'` | Khoảng `46`, dòng sau chỉ có `0000000` | Ngắn hơn hoặc có `\r`, `"`, dấu cách → so với bước 6, rồi `docker compose up -d --force-recreate alertmanager` |
+| 6. Token trong `.env` dài bao nhiêu | `(Get-Content .env)[<số dòng - 1>].Length` (tìm số dòng bằng `Select-String -Path .env -Pattern TELEGRAM`) | 19 (`TELEGRAM_BOT_TOKEN=`) + 46 = **65** | Khác bước 5 → container chưa đọc `.env` mới: `docker compose up -d --force-recreate alertmanager` |
+| 7. Telegram chấp nhận token chưa | `docker compose exec alertmanager sh -c 'wget -qO- https://api.telegram.org/bot$(cat /tmp/telegram_token)/getMe 2>&1 \| head -c 300'` | `"ok":true` kèm tên bot | `401 Unauthorized` → token sai hoặc đã bị `/revoke`. Dòng `TLS certificate validation not implemented` chỉ là lời nhắc của wget, bỏ qua |
+
+**Đã kiểm tra trên bản sao:** máy cloud bị chặn không ra được `api.telegram.org`, nên tôi dựng một máy chủ **Telegram giả** để bắt đúng yêu cầu Alertmanager gửi đi (biến `TELEGRAM_API_URL`, chỉ dùng để test, bình thường không cần đặt). Tắt MySQL → Alertmanager gọi `sendMessage` với đúng token, chat ID, `parse_mode=HTML` và nội dung như mẫu trên; bật lại → tin ✅ có giờ kết thúc. Tắt mysqld-exporter → tin `TargetDown` có chữ `<tên service đó>` được escape đúng, không làm hỏng tin. `amtool check-config` hợp lệ ở cả 3 cách bật (chỉ Telegram, chỉ mail, cả hai). **Đã chạy thật** trên máy Windows (Docker Desktop) ngày 14/10/2026: nhận được tin 🔴 MySQLDown trên Telegram sau khi tắt db.
+
+### 7.16. Rà soát lại toàn bộ thay đổi (15/10/2026)
+
+Rà lại mọi file đã thêm/sửa từ mục 7.10 đến 7.15, chạy lại các công cụ kiểm tra: `docker compose config` (cả chế độ HTTP và HTTPS), `promtool check config` + `promtool check rules` (10 luật hợp lệ), `amtool check-config`, kiểm tra JSON của dashboard. **Không có lỗi làm hỏng hệ thống.** Sửa thêm 2 chỗ nhỏ và cập nhật các ghi chú đã cũ:
+
+| # | Sửa gì | Vì sao | File |
+| - | ------ | ------ | ---- |
+| 46 | `entrypoint.sh` tự **bỏ dấu cách, dấu ngoặc kép, ký tự `\r`** lỡ dán thừa vào `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Thừa 1 ký tự là Telegram báo `Unauthorized`, rất khó nhìn ra bằng mắt | `alertmanager/entrypoint.sh` |
+| 47 | Log khởi động in thêm **độ dài token** (không in token): `Kênh Telegram: BẬT (chat_id ..., token dài 46 ký tự)` | Lỗi thật đã gặp ngày 14/10: `.env` có token đủ 46 ký tự nhưng container vẫn chạy token cũ 43 ký tự (chưa `--force-recreate`). Có số này trong log là so được ngay với `.env` | `alertmanager/entrypoint.sh` |
+| 48 | Sửa các ghi chú đã cũ: "chưa có Alertmanager", "để gửi mail", "5 nơi lấy số" | Từ mục 7.14–7.15 đã có Alertmanager gửi Telegram/mail, và Prometheus lấy số ở **6** nơi (thêm node-exporter, alertmanager) | `prometheus/rules/alerts.yml`, `prometheus/prometheus.yml`, `TRA-CUU-NHANH.md`, mục 7.11 README |
+| 49 | `TRA-CUU-NHANH.md`: thêm luồng **Prometheus → Alertmanager → Telegram** và lệnh "sửa `.env` xong thì `--force-recreate`" | Để bảng tra cứu khớp với hệ thống hiện tại | `TRA-CUU-NHANH.md` |
+
+Đã kiểm tra #46–#47: chạy Alertmanager với token cố tình kẹp dấu cách, dấu ngoặc kép và `\r` → file token còn đúng 46 ký tự, `amtool check-config` hợp lệ; không đặt kênh nào → vẫn báo lỗi rõ ràng như cũ.
+
+**Giới hạn còn lại (biết rõ, chưa làm):** nếu chính **Alertmanager hoặc Prometheus chết** thì không ai nhắn được Telegram để báo việc đó. Cách thường dùng ở production là một luật "luôn luôn kêu" (Watchdog) gửi tới một dịch vụ bên ngoài, dịch vụ đó báo động khi **không** còn nghe thấy nó nữa. Để sau khi lên EC2.
 
 ---
 
@@ -674,6 +1016,13 @@ Kết luận thật thà: bài test này **chứng minh được metric và log 
 | Dashboard **Shop Logs** trống hoàn toàn | Alloy không đọc được docker socket | `docker compose logs alloy`. Trên Linux cần user có quyền với `/var/run/docker.sock`; service đã đặt `user: root` sẵn |
 | Shop Logs có log, nhưng **thiếu service nào đó** | Container đó đang rảnh nên không ghi log gì (ví dụ MySQL lúc không ai truy vấn), hoặc tên service không nằm trong danh sách `keep` của Alloy | Xem lại regex `keep` trong `alloy/config.alloy`. Thêm service mới thì phải thêm tên vào đó |
 | Log nginx bị đếm gấp đôi | `access_log` khai ở http context sẽ **cộng dồn** với bản mặc định của image | Phải khai `access_log` **trong `server` block** (xem lỗi #26 ở mục 7.6) |
+| Trên EC2, xin chứng chỉ báo lỗi `Timeout during connect` hoặc `unauthorized` | Let's Encrypt không gọi được vào cổng 80 của máy | Kiểm tra: domain đã trỏ đúng IP public chưa (`nslookup <domain>`), security group mở cổng 80 chưa, `.env` có `HTTP_PORT=80` chưa, nginx đang chạy chưa |
+| Bật chế độ HTTPS xong nginx khởi động lại liên tục, log báo `cannot load certificate` | Chưa xin chứng chỉ (bước 5 mục 7.10) mà đã bật HTTPS | Quay về HTTP: `docker compose -f docker-compose.yml -f docker-compose.https.yml down` rồi `docker compose up -d`, xin chứng chỉ, sau đó mới bật HTTPS |
+| `ecommerce-alertmanager` khởi động lại liên tục | `.env` chưa bật kênh nào (Telegram hoặc mail), hoặc bật mà thiếu biến | `docker compose logs alertmanager` sẽ ghi rõ thiếu biến nào. Thêm vào `.env` (mục 7.14 mail, 7.15 Telegram) |
+| Đã cài Telegram nhưng tắt db không có tin nào | Prometheus chạy cấu hình cũ chưa có phần `alerting`, hoặc container Alertmanager vẫn giữ token cũ | Dò theo bảng "Không nhận được tin?" ở mục 7.15. Hay gặp nhất: `docker compose restart prometheus` và `docker compose up -d --force-recreate alertmanager` |
+| Sửa `.env` xong mà không có tác dụng | `docker compose restart` **không** đọc lại `.env` | `docker compose up -d --force-recreate <tên service>` |
+| Log Loki có nhiều dòng `entry too far behind` sau khi `stop`/`start` một container | Alloy gửi lại vài dòng log cũ (hơn 1 tiếng) của container vừa bật lại; Loki từ chối vì quá cũ | **Bình thường, không mất log mới.** Bỏ qua |
+| Ô CPU/RAM máy chủ khác số trong Task Manager | Trên Docker Desktop, node-exporter đo máy ảo Linux của Docker, không phải Windows | Bình thường. Trên EC2 số là của chính EC2 |
 | API trả **502** ngay sau khi `up -d --build` | Nginx nhớ IP cũ của container backend vừa bị tạo lại | Đã sửa bằng `resolver 127.0.0.11` + biến trong `proxy_pass` (lỗi #24 mục 7.6). Nếu vẫn gặp: `docker compose restart nginx` |
 
 Tạo tay user `exporter` (chạy bằng root MySQL, thay mật khẩu đúng như trong `.env`):
@@ -712,9 +1061,18 @@ Những điều **không** được làm:
 │   ├── Dockerfile
 │   └── package.json
 ├── frontend/                     # Giao diện tĩnh (HTML/CSS/JS), phục vụ bởi nginx
-├── nginx/default.conf            # Reverse proxy + access log JSON + stub_status nội bộ :8081
+├── nginx/
+│   ├── default.conf              # Chế độ HTTP (local): include các phần chung bên dưới
+│   ├── https.conf                # Chế độ HTTPS (EC2): :80 chuyển hướng, :443 có chứng chỉ
+│   └── snippets/                 # Phần chung: log JSON + stub_status :8081, các đường đi, đường xác minh Let's Encrypt
+├── certbot/www/                  # Nơi certbot để file xác minh domain (để trống trên git)
 ├── mysql/init/01-exporter-user.sh# Tạo user 'exporter' chỉ đọc (chạy lần đầu)
 ├── prometheus/prometheus.yml     # Prometheus đi lấy số ở đâu, bao lâu một lần
+├── prometheus/rules/alerts.yml   # 10 luật cảnh báo (mục 7.11)
+├── alertmanager/                 # Gửi cảnh báo qua Telegram / mail (mục 7.14, 7.15)
+│   ├── alertmanager.yml          # Khuôn cấu hình: gom nhóm, nhịp gửi, người nhận
+│   ├── entrypoint.sh             # Điền giá trị .env vào khuôn rồi chạy Alertmanager
+│   └── templates/                # Mẫu mail (email.tmpl) và tin nhắn Telegram (telegram.tmpl)
 ├── loki/loki-config.yml          # Loki: lưu log ở đâu, giữ bao lâu, giới hạn gì
 ├── alloy/config.alloy            # Alloy: gom log container, parse từng service, đẩy sang Loki
 ├── grafana/
@@ -726,11 +1084,13 @@ Những điều **không** được làm:
 │   ├── dashboards/shop-overview.json    # Dashboard "Shop Overview" — số liệu (Prometheus)
 │   └── dashboards/shop-logs.json        # Dashboard "Shop Logs" — log (Loki)
 ├── loadtest/load.js              # Kịch bản k6 tạo tải để kiểm chứng metric + log
+├── loadtest/overload.js          # Kịch bản k6 QUÁ TẢI: 300 khách không nghỉ, 16 phút (mục 7.12)
 ├── TRA-CUU-NHANH.md              # Bảng tra cứu tool / port / link / lệnh
 ├── .env.example                  # File mẫu biến môi trường (commit)
 ├── .env                          # Biến thật + mật khẩu (KHÔNG commit)
 ├── .gitattributes                # Ép xuống dòng kiểu Linux cho script/config
 ├── docker-compose.yml            # Bật cả hệ thống bằng 1 lệnh
+├── docker-compose.https.yml      # Chồng thêm lên file trên để bật HTTPS + certbot (chỉ EC2)
 └── README.md
 ```
 
@@ -771,6 +1131,7 @@ curl -X POST http://localhost:8080/api/orders \
 
 Theo slide, các bước tiếp theo **chưa** có trong bài này:
 
-- Bước 6: luật cảnh báo + Alertmanager (gồm cả cảnh báo dựa trên log — thư mục `grafana/provisioning/alerting/` và `ruler` của Loki đã để sẵn chỗ)
+- Bước 6: **xong** — luật cảnh báo (mục 7.11, 7.13) + Alertmanager gửi Telegram / mail (mục 7.14, 7.15). Còn để ngỏ: cảnh báo dựa trên log (thư mục `grafana/provisioning/alerting/` và `ruler` của Loki đã để sẵn chỗ)
+- Báo động khi chính Alertmanager/Prometheus chết (Watchdog, mục 7.16): làm khi lên EC2
 - Bước 7–8: HolmesGPT + Bedrock
-- Đưa lên server (EC2), gắn domain + HTTPS: làm sau khi web hoàn thiện
+- Đưa lên server (EC2): làm sau khi web hoàn thiện. node-exporter và chế độ HTTPS đã chuẩn bị sẵn (mục 7.10), còn thiếu domain do lead cấp

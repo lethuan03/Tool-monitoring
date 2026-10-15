@@ -10,7 +10,10 @@
 | **Web shop** | Cửa hàng | <http://localhost:8080> | Không cần | Dùng web, tạo traffic |
 | **Grafana** | Bảng điều khiển | <http://localhost:3001> | `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD` trong `.env` | **Demo, theo dõi hằng ngày** (dashboard Shop Overview) |
 | **Prometheus — gõ PromQL** | Sổ ghi số | <http://localhost:9090/query> | Không cần (chỉ mở trên máy này) | Tra cứu, thử query |
-| **Prometheus — danh sách target** | | <http://localhost:9090/targets> | | Xem 4 nơi Prometheus đi lấy số có **UP** không |
+| **Prometheus — danh sách target** | | <http://localhost:9090/targets> | | Xem 6 nơi Prometheus đi lấy số có **UP** không |
+| **Prometheus — cảnh báo** | | <http://localhost:9090/alerts> | | Xem luật nào đang **pending** / **firing** (README mục 7.11) |
+| **Alertmanager** | Người đưa thư | <http://localhost:9093> | Không cần | Xem cảnh báo đang gửi, tạm tắt thông báo (Silence) |
+| **mailpit** (chỉ khi test mail) | Hộp thư giả | <http://localhost:8025> | Không cần | Xem mail cảnh báo khi chưa dùng Gmail thật |
 | **Health check web** | | <http://localhost:8080/health> | Không cần | Kiểm tra backend còn sống |
 
 ## 2. Toàn bộ container và port
@@ -29,6 +32,10 @@
 | `db` | ecommerce-db | `mysql:8.0.40` | `3306` | Không | backend, mysqld-exporter |
 | `nginx-exporter` | ecommerce-nginx-exporter | `nginx/nginx-prometheus-exporter:1.3.0` | `9113` | Không | Prometheus |
 | `mysqld-exporter` | ecommerce-mysqld-exporter | `prom/mysqld-exporter:v0.15.1` | `9104` | Không | Prometheus |
+| `node-exporter` | ecommerce-node-exporter | `prom/node-exporter:v1.12.1` | `9100` | Không | Prometheus (số đo CPU/RAM/ổ đĩa của máy chủ) |
+| `alertmanager` | ecommerce-alertmanager | `prom/alertmanager:v0.34.1` | `9093` | **Chỉ localhost**: `127.0.0.1:9093` | Prometheus đẩy cảnh báo tới; nó gửi Telegram / mail |
+| `mailpit` (chỉ khi test) | ecommerce-mailpit | `axllent/mailpit:v1.31.5` | `1025` (nhận mail), `8025` (web) | **Chỉ localhost**: `127.0.0.1:8025` | Alertmanager gửi mail test tới |
+| `certbot` (chỉ EC2) | ecommerce-certbot | `certbot/certbot:v5.8.0` | không có | Không | Tự gia hạn chứng chỉ HTTPS (README mục 7.10) |
 | `prometheus` | ecommerce-prometheus | `prom/prometheus:v3.1.0` | `9090` | **Chỉ localhost**: `127.0.0.1:9090` | Bạn (trình duyệt); Grafana |
 | `grafana` | ecommerce-grafana | `grafana/grafana:11.3.0` | `3000` | **Chỉ localhost**: `127.0.0.1:3001` (đổi bằng `GRAFANA_PORT`) | Bạn (trình duyệt) |
 
@@ -41,9 +48,12 @@ Khách ──► nginx :8080 ──► frontend :80 / backend :3000 ──► db
 
 Prometheus :9090 ── mỗi 15s đi lấy số ──► backend :3000/metrics
                                        ├─► nginx-exporter :9113 ──► nginx :8081/stub_status
-                                       └─► mysqld-exporter :9104 ──► db :3306
+                                       ├─► mysqld-exporter :9104 ──► db :3306
+                                       └─► node-exporter :9100 ──► CPU/RAM/ổ đĩa của máy chủ
 
 Grafana :3001 ── hỏi PromQL mỗi 15s ──► Prometheus :9090
+
+Prometheus ── luật FIRING ──► Alertmanager :9093 ──► Telegram (và/hoặc mail)
 ```
 
 ## 4. Lệnh hay dùng
@@ -56,5 +66,7 @@ Grafana :3001 ── hỏi PromQL mỗi 15s ──► Prometheus :9090
 | Tắt (giữ dữ liệu) | `docker compose down` |
 | Tắt + xoá sạch dữ liệu | `docker compose down -v` |
 | Giả lập sự cố DB / khôi phục | `docker compose stop db` / `docker compose start db` |
+| Sửa `.env` xong (token, mật khẩu...) | `docker compose up -d --force-recreate <tên service>` (`restart` **không** đọc lại `.env`) |
+| Bật trên EC2 có HTTPS | `docker compose -f docker-compose.yml -f docker-compose.https.yml up -d` (lần đầu xem README mục 7.10) |
 
 PromQL mẫu để thử: xem **README mục 4.3**.

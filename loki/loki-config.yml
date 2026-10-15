@@ -76,8 +76,9 @@ limits_config:
   # phía trên khung Explore -> Logs
   volume_enabled: true
 
-  # Cho phép truy vấn ngược về tối đa 7 ngày (khớp retention)
-  max_query_lookback: 168h
+  # Cho phép truy vấn ngược đúng bằng thời gian giữ log. Dùng chung biến với
+  # retention_period để đổi 1 chỗ trong .env là cả 2 cùng đổi (README #33).
+  max_query_lookback: ${LOKI_RETENTION_PERIOD}
 
 # Compactor dọn index và THỰC THI retention (không bật thì log không bao giờ bị xoá)
 compactor:

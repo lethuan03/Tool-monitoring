@@ -1,0 +1,30 @@
+{{/*
+  MẪU TIN NHẮN TELEGRAM — Shop Demo. Cùng nội dung với mẫu mail (email.tmpl).
+  Telegram chỉ cho vài thẻ HTML: <b> <i> <code> <pre> <a>, nên chữ lấy từ luật được
+  escape bằng `| html` (ví dụ "<tên service>" trong mô tả sẽ không làm hỏng tin nhắn).
+  Không dùng được màu,
+  nên dùng biểu tượng: 🔴 critical, 🟠 warning, ✅ đã khắc phục.
+  Sửa xong: docker compose restart alertmanager. Xem README mục 7.15.
+*/}}
+
+{{ define "shop.telegram.message" -}}
+{{- if eq .Status "firing" -}}
+{{ if eq .CommonLabels.severity "critical" }}🔴{{ else }}🟠{{ end }} <b>SỰ CỐ: {{ .CommonLabels.alertname }}</b>
+Mức độ: <b>{{ .CommonLabels.severity | toUpper }}</b> · {{ len .Alerts.Firing }} nơi đang bị
+{{- else -}}
+✅ <b>ĐÃ KHẮC PHỤC: {{ .CommonLabels.alertname }}</b>
+Mức độ: {{ .CommonLabels.severity | toUpper }}
+{{- end }}
+{{ range .Alerts }}
+━━━━━━━━━━━━━━
+<b>Sự cố:</b> {{ .Annotations.summary | html }}
+<b>Trạng thái:</b> {{ if eq .Status "firing" }}ĐANG XẢY RA{{ else }}ĐÃ HẾT{{ end }}
+<b>Bắt đầu:</b> {{ (.StartsAt | tz "Asia/Ho_Chi_Minh").Format "15:04:05 02/01/2006" }}
+{{- if eq .Status "resolved" }}
+<b>Kết thúc:</b> {{ (.EndsAt | tz "Asia/Ho_Chi_Minh").Format "15:04:05 02/01/2006" }}
+{{- end }}
+<b>Nơi bị:</b> {{ if .Labels.instance }}<code>{{ .Labels.instance }}</code>{{ else }}toàn hệ thống{{ end }}{{ if .Labels.job }} (job: {{ .Labels.job }}){{ end }}
+<b>Nên làm gì:</b> {{ .Annotations.description | html }}
+{{ end }}
+<i>Shop Demo · Alertmanager. Chưa hết sẽ nhắc lại mỗi 1 tiếng.</i>
+{{- end }}

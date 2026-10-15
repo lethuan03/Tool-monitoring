@@ -44,7 +44,7 @@ discovery.relabel "compose" {
   // chạy project docker khác thì log của nó không lọt vào đây.
   rule {
     source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
-    regex         = "db|backend|frontend|nginx|nginx-exporter|mysqld-exporter|node-exporter|cadvisor|prometheus|grafana|loki|alloy"
+    regex         = "db|backend|frontend|nginx|nginx-exporter|mysqld-exporter|node-exporter|cadvisor|prometheus|grafana|loki|alloy|alertmanager"
     action        = "keep"
   }
 
@@ -101,11 +101,16 @@ loki.process "parse" {
       expression = "\\[(?P<nginx_level>emerg|alert|crit|error|warn|notice)\\]"
     }
 
-    // Suy ra mức độ nghiêm trọng từ HTTP status:
-    //   5xx = error (server lỗi) · 4xx = warn (khách gửi sai) · còn lại = info
+    // Suy ra mức độ nghiêm trọng:
+    //   - Dòng access log (có status): 5xx = error · 4xx = warn · còn lại = info
+    //   - Dòng error log của nginx (có [mức]): [notice] = info, [warn] = warn,
+    //     còn [error]/[crit]/[alert]/[emerg] = error.
+    //     Không gộp hết thành error: mỗi lần nginx khởi động nó in vài dòng
+    //     "[notice] start worker process" — nếu coi là error thì ô "Dòng ERROR"
+    //     trên dashboard tăng vọt dù không có lỗi gì (xem README #28).
     stage.template {
       source   = "level"
-      template = "{{ if .status }}{{ if ge (atoi .status) 500 }}error{{ else if ge (atoi .status) 400 }}warn{{ else }}info{{ end }}{{ else if .nginx_level }}error{{ else }}info{{ end }}"
+      template = "{{ if .status }}{{ if ge (atoi .status) 500 }}error{{ else if ge (atoi .status) 400 }}warn{{ else }}info{{ end }}{{ else if eq .nginx_level \"notice\" }}info{{ else if eq .nginx_level \"warn\" }}warn{{ else if .nginx_level }}error{{ else }}info{{ end }}"
     }
 
     // status/method có số giá trị hữu hạn -> đặt nhãn được.
@@ -207,7 +212,7 @@ loki.process "parse" {
   // Prometheus, Grafana, Loki, Alloy và 2 exporter đều ghi log kiểu logfmt
   // (key=value), nên lấy trực tiếp key `level`.
   stage.match {
-    selector = "{service=~\"prometheus|grafana|loki|alloy|nginx-exporter|mysqld-exporter|node-exporter|cadvisor\"}"
+    selector = "{service=~\"prometheus|grafana|loki|alloy|alertmanager|nginx-exporter|mysqld-exporter|node-exporter|cadvisor\"}"
 
     stage.logfmt {
       mapping = {

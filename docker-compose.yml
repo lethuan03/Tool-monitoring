@@ -76,6 +76,10 @@ services:
       - "${HTTP_PORT:-8080}:80"   # public; port 8081 (stub_status) stays internal
     volumes:
       - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      # Phần cấu hình dùng chung cho chế độ HTTP (local) và HTTPS (EC2)
+      - ./nginx/snippets:/etc/nginx/snippets:ro
+      # Thư mục certbot ghi file xác minh domain (chỉ dùng khi xin cert trên EC2)
+      - ./certbot/www:/var/www/certbot:ro
     networks:
       - appnet
     logging: *default-logging
@@ -113,6 +117,29 @@ services:
     logging: *default-logging
     restart: unless-stopped
 
+  # 6b) node-exporter — số đo của chính MÁY CHỦ: CPU, RAM, ổ đĩa, mạng.
+  # Các exporter khác chỉ đo từng ứng dụng; nếu máy hết RAM hay đầy ổ đĩa thì
+  # MySQL/backend chết theo mà không ai báo trước. Trên EC2 nó đo chính con EC2.
+  # Trên Docker Desktop (Windows) nó đo máy ảo Linux mà Docker chạy bên trong,
+  # KHÔNG phải Windows, nên số liệu local chỉ để thử, đừng so với Task Manager.
+  node-exporter:
+    image: prom/node-exporter:v1.12.1
+    container_name: ecommerce-node-exporter
+    command:
+      # Đọc /proc, /sys, ổ đĩa của máy chủ qua thư mục /host (mount ở dưới)
+      - --path.rootfs=/host
+    # Dùng chung "không gian tiến trình" với máy chủ để thấy số liệu thật của máy,
+    # không phải của riêng container
+    pid: host
+    volumes:
+      # Mount toàn bộ ổ đĩa máy chủ, CHỈ ĐỌC
+      - /:/host:ro
+    # Không mở cổng ra ngoài: Prometheus đọc qua mạng nội bộ node-exporter:9100
+    networks:
+      - appnet
+    logging: *default-logging
+    restart: unless-stopped
+
   # 7) Prometheus (pulls metrics from backend + exporters every 15s)
   prometheus:
     image: prom/prometheus:v3.1.0
@@ -124,6 +151,8 @@ services:
       - --storage.tsdb.retention.size=${PROMETHEUS_RETENTION_SIZE:-5GB}
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # Luật cảnh báo (CPU, RAM, ổ đĩa, target chết, lỗi 5xx...)
+      - ./prometheus/rules:/etc/prometheus/rules:ro
       - prometheus-data:/prometheus
     ports:
       # Bound to loopback only: reach it on the server via SSH tunnel, never publicly
@@ -137,6 +166,52 @@ services:
       - backend
       - nginx-exporter
       - mysqld-exporter
+      - node-exporter
+      - alertmanager
+    networks:
+      - appnet
+    logging: *default-logging
+    restart: unless-stopped
+
+  # 7b) Alertmanager — nhận cảnh báo từ Prometheus, gom nhóm, gửi TELEGRAM và/hoặc MAIL.
+  # Thông tin kênh gửi (TELEGRAM_*, SMTP_*) đặt trong .env. Xem README mục 7.14-7.15.
+  alertmanager:
+    image: prom/alertmanager:v0.34.1
+    container_name: ecommerce-alertmanager
+    # entrypoint.sh điền giá trị .env vào khuôn alertmanager.yml rồi mới chạy
+    entrypoint: ["/bin/sh", "/etc/alertmanager/entrypoint.sh"]
+    environment:
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_FROM=${SMTP_FROM:-}
+      - SMTP_USERNAME=${SMTP_USERNAME:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - SMTP_REQUIRE_TLS=${SMTP_REQUIRE_TLS:-true}
+      - ALERT_EMAIL_TO=${ALERT_EMAIL_TO:-}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+      - TELEGRAM_API_URL=${TELEGRAM_API_URL:-https://api.telegram.org}
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - ./alertmanager/entrypoint.sh:/etc/alertmanager/entrypoint.sh:ro
+      - ./alertmanager/templates:/etc/alertmanager/templates:ro
+      - alertmanager-data:/alertmanager
+    ports:
+      # Giao diện xem cảnh báo đang gửi / tạm tắt (silence) — loopback only
+      - "127.0.0.1:9093:9093"
+    networks:
+      - appnet
+    logging: *default-logging
+    restart: unless-stopped
+
+  # (Chỉ để TEST) mailpit — hộp thư giả: bắt mọi mail gửi tới nó, xem trên web.
+  # Không bật mặc định. Bật bằng: docker compose --profile mail-test up -d
+  # rồi đặt SMTP_HOST=mailpit:1025, SMTP_REQUIRE_TLS=false trong .env.
+  mailpit:
+    image: axllent/mailpit:v1.31.5
+    container_name: ecommerce-mailpit
+    profiles: ["mail-test"]
+    ports:
+      - "127.0.0.1:8025:8025"   # web xem mail: http://localhost:8025
     networks:
       - appnet
     logging: *default-logging
@@ -175,7 +250,11 @@ services:
     image: grafana/alloy:v1.20.1
     container_name: ecommerce-alloy
     # Cần quyền root để đọc /var/run/docker.sock (socket thuộc root:docker).
-    # Socket được mount READ-ONLY để Alloy chỉ đọc được, không điều khiển Docker.
+    # LƯU Ý BẢO MẬT: ":ro" chỉ chặn ghi/xoá FILE socket, KHÔNG chặn lệnh gửi
+    # qua socket. Ai điều khiển được container này là điều khiển được Docker
+    # (tạo/xoá container, mount ổ đĩa host) = quyền root trên máy. Chấp nhận
+    # được cho demo; lên production nên đặt docker-socket-proxy chỉ mở API đọc
+    # (containers, events, logs) ở giữa. Xem README #31.
     user: root
     command:
       - run
@@ -245,3 +324,4 @@ volumes:
   grafana-data:
   loki-data:
   alloy-data:
+  alertmanager-data:

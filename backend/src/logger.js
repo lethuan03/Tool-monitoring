@@ -72,7 +72,9 @@ function requestLogger(req, res, next) {
     log[level]('http_request', {
       method: req.method,
       route,
-      path: req.originalUrl,
+      // Bỏ query string (?email=...&token=...) để log không chứa dữ liệu nhạy
+      // cảm — giống nginx dùng $uri thay vì $request_uri. Xem README #30.
+      path: req.originalUrl.split('?')[0],
       status: res.statusCode,
       duration_ms: Math.round(durationMs * 1000) / 1000,
       ip: req.ip,

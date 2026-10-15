@@ -1,0 +1,67 @@
+# Alertmanager: nhận cảnh báo từ Prometheus -> gom nhóm -> gửi TELEGRAM và/hoặc MAIL.
+#
+# Bật kênh nào là do .env: có TELEGRAM_BOT_TOKEN thì gửi Telegram, có SMTP_HOST
+# thì gửi mail; có cả hai thì gửi cả hai. entrypoint.sh xoá phần của kênh không
+# dùng (các đoạn giữa dấu "# >>> ..." và "# <<< ...").
+#
+# File này là KHUÔN. Các chữ __TÊN__ được alertmanager/entrypoint.sh thay bằng
+# giá trị trong .env (SMTP_HOST, SMTP_FROM, ...) mỗi lần container khởi động,
+# vì Alertmanager không tự đọc biến môi trường trong file cấu hình.
+# Mật khẩu mail KHÔNG nằm trong file này: entrypoint ghi nó ra một file riêng
+# trong container (smtp_auth_password_file). Xem README mục 7.14.
+
+global:
+  # >>> email
+  smtp_smarthost: '__SMTP_HOST__'          # máy chủ gửi mail, dạng host:cổng
+  smtp_from: '__SMTP_FROM__'               # địa chỉ người gửi hiện trong mail
+  smtp_auth_username: '__SMTP_USERNAME__'  # (entrypoint xoá 2 dòng auth nếu để trống)
+  smtp_auth_password_file: '/tmp/smtp_password'
+  smtp_require_tls: __SMTP_REQUIRE_TLS__   # Gmail: true; mailpit (test): false
+  # <<< email
+  # >>> telegram
+  # Địa chỉ API của Telegram (chỉ đổi khi test bằng máy chủ giả)
+  telegram_api_url: '__TELEGRAM_API_URL__'
+  # <<< telegram
+
+# Mẫu tin nhắn Telegram và mẫu mail nằm ở đây
+templates:
+  - /etc/alertmanager/templates/*.tmpl
+
+# --- Gom nhóm và nhịp gửi ---
+route:
+  receiver: canh-bao
+  # Các cảnh báo cùng tên luật gộp vào MỘT mail (ví dụ 3 target cùng DOWN = 1 mail)
+  group_by: ['alertname']
+  # Chờ 10s sau cảnh báo đầu tiên để gom các cảnh báo cùng nhóm đến sát nhau
+  group_wait: 10s
+  # Nhóm đã gửi rồi mà có thêm cảnh báo mới -> chờ 1 phút rồi gửi bản cập nhật
+  group_interval: 1m
+  # Sự cố vẫn chưa hết -> nhắc lại mỗi 1 tiếng (không spam mỗi phút)
+  repeat_interval: 1h
+
+receivers:
+  - name: canh-bao
+    # >>> telegram
+    telegram_configs:
+      - bot_token_file: /tmp/telegram_token   # token của bot (entrypoint ghi từ .env)
+        chat_id: __TELEGRAM_CHAT_ID__          # gửi vào chat nào (số, lấy theo README 7.15)
+        parse_mode: HTML                       # cho phép in đậm trong tin nhắn
+        send_resolved: true                    # sự cố hết -> nhắn thêm "ĐÃ KHẮC PHỤC"
+        message: '{{ template "shop.telegram.message" . }}'
+    # <<< telegram
+    # >>> email
+    email_configs:
+      - to: '__ALERT_EMAIL_TO__'           # nhiều người nhận: cách nhau bằng dấu phẩy
+        send_resolved: true                # sự cố hết -> gửi thêm mail "ĐÃ KHẮC PHỤC"
+        headers:
+          Subject: '{{ template "shop.email.subject" . }}'
+        html: '{{ template "shop.email.html" . }}'
+    # <<< email
+
+# --- Chặn mail trùng lặp ---
+# Khi lỗi nặng đang bật thì không gửi thêm lỗi nhẹ cùng loại (đỡ 2 mail cho 1 sự cố)
+inhibit_rules:
+  - source_matchers: ['alertname = HostDiskFull']
+    target_matchers: ['alertname = HostDiskAlmostFull']
+  - source_matchers: ['alertname = MySQLDown']
+    target_matchers: ['alertname = MySQLTooManyConnections']

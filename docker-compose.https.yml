@@ -1,0 +1,51 @@
+# Bật HTTPS bằng Let's Encrypt — CHỈ dùng trên EC2 có domain thật.
+# Local (máy bạn) KHÔNG dùng file này: cứ `docker compose up -d` như cũ là HTTP.
+#
+# Cách dùng trên EC2 (chi tiết từng bước ở README mục 7.10):
+#   docker compose -f docker-compose.yml -f docker-compose.https.yml up -d
+#
+# File này "chồng" lên docker-compose.yml: chỉ ghi những chỗ khác đi,
+# còn lại giữ nguyên như file gốc.
+
+services:
+  nginx:
+    ports:
+      # Thêm cổng 443 (HTTPS). Cổng 80 vẫn mở để xác minh domain + chuyển sang HTTPS.
+      - "443:443"
+    volumes:
+      # Cùng đường đích với file gốc -> THAY cấu hình HTTP bằng cấu hình HTTPS
+      - ./nginx/https.conf:/etc/nginx/conf.d/default.conf:ro
+      # Chứng chỉ do certbot tạo, nginx chỉ đọc
+      - letsencrypt:/etc/letsencrypt:ro
+    # Cert được gia hạn thì nginx phải nạp lại mới dùng cert mới.
+    # Vòng lặp này cứ 6 tiếng gọi `nginx -s reload` một lần (không làm rớt kết nối).
+    command: >-
+      /bin/sh -c 'while :; do sleep 6h; nginx -s reload; done &
+      exec nginx -g "daemon off;"'
+
+  # certbot — công cụ chính chủ của Let's Encrypt để xin và gia hạn chứng chỉ.
+  # Cert Let's Encrypt chỉ sống 90 ngày; container này mỗi 12 tiếng hỏi
+  # "sắp hết hạn chưa?" (còn dưới 30 ngày mới gia hạn thật), nên không phải nhớ làm tay.
+  certbot:
+    image: certbot/certbot:v5.8.0
+    container_name: ecommerce-certbot
+    volumes:
+      - letsencrypt:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    entrypoint: >-
+      /bin/sh -c 'trap exit TERM;
+      while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done'
+    networks:
+      - appnet
+    # (Không dùng được *default-logging của file gốc: "neo" YAML chỉ có tác dụng trong cùng 1 file)
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    restart: unless-stopped
+
+volumes:
+  # Nơi giữ chứng chỉ + khoá bí mật. Là volume Docker (không nằm trong thư mục
+  # code) nên không bao giờ lỡ tay commit lên git.
+  letsencrypt:
