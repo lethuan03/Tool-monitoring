@@ -1,0 +1,69 @@
+/* Chỉnh thêm cho trang admin, nằm trên nền template Tabler (vendor/tabler). */
+
+.admin-brand { font-weight: 800; letter-spacing: -0.3px; }
+.admin-brand-mark { color: var(--tblr-primary); margin-right: 2px; }
+
+/* Ảnh nhỏ trong bảng sản phẩm */
+.admin-thumb {
+  width: 48px;
+  height: 48px;
+  flex: none;
+  border-radius: 8px;
+  object-fit: cover;
+  border: 1px solid var(--tblr-border-color);
+}
+.admin-thumb-empty {
+  display: inline-grid;
+  place-items: center;
+  color: var(--tblr-secondary);
+}
+
+/* Hộp thoại <dialog> mặc định của trình duyệt -> trông giống modal Tabler */
+.admin-dialog {
+  width: min(560px, 92vw);
+  padding: 0;
+  border: none;
+  border-radius: var(--tblr-border-radius-lg, 8px);
+  background: transparent;
+  color: inherit;
+}
+.admin-dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
+.admin-dialog .modal-content { background: var(--tblr-bg-surface); }
+.admin-preview {
+  max-width: 100%;
+  max-height: 160px;
+  border-radius: 8px;
+  border: 1px solid var(--tblr-border-color);
+}
+
+/* Mục Monitoring: mỗi tool một ô logo + tên (do tools.js vẽ) */
+.tool-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 16px;
+}
+.tool-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px 12px;
+  background: var(--tblr-bg-surface);
+  border: 1px solid var(--tblr-border-color);
+  border-radius: var(--tblr-border-radius-lg, 8px);
+  color: var(--tblr-body-color);
+  text-decoration: none;
+  text-align: center;
+  transition: transform 0.2s, border-color 0.2s;
+}
+.tool-tile:hover,
+.tool-tile:focus-visible {
+  transform: translateY(-3px);
+  border-color: var(--tblr-primary);
+  color: var(--tblr-body-color);
+  text-decoration: none;
+}
+.tool-tile:focus-visible { outline: 2px solid var(--tblr-primary); outline-offset: 2px; }
+.tool-tile img { width: 48px; height: 48px; object-fit: contain; }
+.tool-name { font-size: 15px; font-weight: 700; }

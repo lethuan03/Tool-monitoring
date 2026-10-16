@@ -7,7 +7,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css" />
+  <!-- ?v=...: đổi số này mỗi lần sửa CSS/JS để trình duyệt tải bản mới thay vì dùng cache cũ -->
+  <link rel="stylesheet" href="styles.css?v=20261016-3" />
 </head>
 <body>
   <!-- Navbar -->
@@ -20,6 +21,9 @@
         <a href="#products">Sản phẩm</a>
         <a href="#features">Ưu điểm</a>
       </nav>
+      <!-- Trang quản trị: thêm/sửa/xoá sản phẩm + link tool monitoring (admin.html).
+           CHƯA có đăng nhập / phân quyền. -->
+      <a href="/admin.html" class="nav-admin">Admin</a>
       <button id="cartBtn" class="cart-btn" aria-label="Mở giỏ hàng">
         <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="9" cy="21" r="1"></circle><circle cx="20" cy="21" r="1"></circle>
@@ -86,6 +90,6 @@
   <!-- Toast -->
   <div id="toast" class="toast"></div>
 
-  <script src="app.js"></script>
+  <script src="app.js?v=20261016-3"></script>
 </body>
 </html>

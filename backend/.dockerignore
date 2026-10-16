@@ -4,3 +4,4 @@ Dockerfile
 .dockerignore
 .env
 .env.*
+tests

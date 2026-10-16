@@ -384,7 +384,25 @@ body {
 .toast.ok { border-color: rgba(52, 211, 153, 0.5); color: var(--success); }
 .toast.err { border-color: rgba(248, 113, 113, 0.5); color: var(--danger); }
 
+/* ---------- Nút "Admin" trên navbar ---------- */
+/* Đặt ngoài .nav-links (bị ẩn trên mobile) để màn hình nhỏ vẫn thấy */
+.nav-admin {
+  padding: 8px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 600;
+  transition: color 0.2s, border-color 0.2s;
+}
+.nav-admin:hover,
+.nav-admin:focus-visible { color: var(--text); border-color: rgba(99, 102, 241, 0.5); }
+
 @media (max-width: 640px) {
   .nav-links { display: none; }
+  /* links ẩn nên đẩy "Admin" sang phải */
+  .nav-links + .nav-admin { margin-left: auto; }
   .hero { min-height: 400px; }
 }

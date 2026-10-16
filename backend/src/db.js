@@ -48,6 +48,24 @@ const SCHEMA = [
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
 ];
 
+// --- Migration: cột `active` cho chức năng XOÁ sản phẩm ở trang admin ---
+// Không xoá hẳn dòng (DELETE) được, vì order_items có khoá ngoại trỏ tới
+// products: sản phẩm đã từng bán sẽ bị MySQL chặn xoá, và nếu xoá được thì
+// lịch sử đơn hàng mất tham chiếu. Nên "xoá" = đặt active = 0 (ẩn khỏi cửa
+// hàng và admin), đơn hàng cũ vẫn nguyên.
+// MySQL 8.0 không có "ADD COLUMN IF NOT EXISTS", nên hỏi information_schema
+// trước. DB tạo mới hay DB cũ đã có dữ liệu đều chạy được, chạy lại nhiều lần
+// cũng không sao.
+async function migrate() {
+  const [[{ c }]] = await pool.query(
+    `SELECT COUNT(*) AS c FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'products' AND COLUMN_NAME = 'active'`
+  );
+  if (c > 0) return;
+  await pool.query('ALTER TABLE products ADD COLUMN active TINYINT(1) NOT NULL DEFAULT 1');
+  log.info('db_migrated', { change: 'products.active' });
+}
+
 // --- Seed sample products on first run ---
 async function seed() {
   const [[{ c }]] = await pool.query('SELECT COUNT(*) AS c FROM products');
@@ -87,6 +105,7 @@ async function waitForDb(retries = Number(process.env.DB_CONNECT_RETRIES) || 30,
 async function initDb() {
   await waitForDb();
   for (const stmt of SCHEMA) await pool.query(stmt);
+  await migrate();
   await seed();
   log.info('db_connected', { host: config.host, port: config.port, database: config.database });
 }

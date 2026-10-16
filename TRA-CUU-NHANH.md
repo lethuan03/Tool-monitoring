@@ -2,12 +2,14 @@
 
 > Port mặc định theo `.env.example`. Nếu bạn đã đổi `HTTP_PORT` / `GRAFANA_PORT` trong `.env` thì thay số tương ứng.
 > Ví dụ máy đang trùng 8080 với app khác thì đặt `HTTP_PORT=8088` → web ở <http://localhost:8088>.
+> Đổi `GRAFANA_PORT` / `LOKI_PORT` / `ALLOY_PORT` thì sửa thêm `TOOL_CONFIG` trong `frontend/tools.js` (link ở mục Monitoring của trang Admin) rồi `docker compose up -d --build frontend`.
 
 ## 1. Mở trên trình duyệt (dùng hằng ngày)
 
 | Tool | Vai trò (ví von) | Link | Đăng nhập | Dùng khi nào |
 | ---- | ---------------- | ---- | --------- | ------------ |
 | **Web shop** | Cửa hàng | <http://localhost:8080> | Không cần | Dùng web, tạo traffic |
+| **Trang Admin** | Quầy quản lý | <http://localhost:8080/admin.html> (nút **Admin** trên navbar) | **Chưa có** (làm sau) | Thêm / sửa / xoá sản phẩm, chỉnh tồn kho; mục **Monitoring** mở các tool bên dưới ở tab mới |
 | **Grafana** | Bảng điều khiển | <http://localhost:3001> | `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD` trong `.env` | **Demo, theo dõi hằng ngày** (dashboard Shop Overview) |
 | **Prometheus — gõ PromQL** | Sổ ghi số | <http://localhost:9090/query> | Không cần (chỉ mở trên máy này) | Tra cứu, thử query |
 | **Prometheus — danh sách target** | | <http://localhost:9090/targets> | | Xem 6 nơi Prometheus đi lấy số có **UP** không |

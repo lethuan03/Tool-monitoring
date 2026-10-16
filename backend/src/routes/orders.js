@@ -65,9 +65,12 @@ router.post(
       const lineItems = [];
       let total = 0;
       for (const it of items) {
-        const [[product]] = await conn.query('SELECT * FROM products WHERE id = ? FOR UPDATE', [
-          it.productId
-        ]);
+        // active = 1: sản phẩm đã bị xoá ở trang admin thì không mua được nữa
+        // (giỏ hàng cũ trong localStorage của khách vẫn có thể còn nó)
+        const [[product]] = await conn.query(
+          'SELECT * FROM products WHERE id = ? AND active = 1 FOR UPDATE',
+          [it.productId]
+        );
         if (!product) {
           await conn.rollback();
           return res.status(400).json({ error: `Product ${it.productId} not found` });

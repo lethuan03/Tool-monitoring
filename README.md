@@ -43,6 +43,7 @@ Sau khoảng 30–60 giây:
 | Mở gì       | Địa chỉ                         |
 | ----------- | ------------------------------- |
 | Trang web   | <http://localhost:8080> (hoặc port bạn đặt ở `HTTP_PORT`) |
+| **Trang Admin** (nút **Admin** trên navbar shop) | <http://localhost:8080/admin.html> — thêm / sửa / xoá sản phẩm, mục **Monitoring** có link tới mọi tool bên dưới. **Chưa có đăng nhập**: ai mở được trang là sửa được sản phẩm. Đổi cổng tool trong `.env` thì sửa `TOOL_CONFIG` trong `frontend/tools.js` rồi `docker compose up -d --build frontend` |
 | **Grafana (màn hình theo dõi chính)** | <http://localhost:3001> — đăng nhập bằng `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD` trong `.env`, mở ra là dashboard **Shop Overview**. Dashboard log: **Shop Logs** (menu Dashboards → thư mục Shop) |
 | Prometheus (dành cho kỹ thuật, tra cứu/gỡ lỗi) | <http://localhost:9090>         |
 | Loki (log — kỹ thuật, bình thường xem qua Grafana) | <http://localhost:3100/ready> |

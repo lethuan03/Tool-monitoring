@@ -58,7 +58,7 @@ function renderProducts() {
       (p) => `
       <article class="card">
         <div class="card-media">
-          <img src="${p.image}" alt="${escapeHtml(p.name)}" loading="lazy" />
+          <img src="${escapeHtml(p.image)}" alt="${escapeHtml(p.name)}" loading="lazy" />
           <span class="card-tag">NEW</span>
         </div>
         <div class="card-body">
@@ -134,7 +134,7 @@ function renderCart() {
       .map(
         (e) => `
         <div class="cart-row">
-          <img src="${e.product.image}" alt="${escapeHtml(e.product.name)}" />
+          <img src="${escapeHtml(e.product.image)}" alt="${escapeHtml(e.product.name)}" />
           <div class="info">
             <div class="n">${escapeHtml(e.product.name)}</div>
             <div class="p">${fmt(e.product.price)}</div>
