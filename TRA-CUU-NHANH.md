@@ -9,7 +9,7 @@
 | Tool | Vai trò (ví von) | Link | Đăng nhập | Dùng khi nào |
 | ---- | ---------------- | ---- | --------- | ------------ |
 | **Web shop** | Cửa hàng | <http://localhost:8080> | Không cần | Dùng web, tạo traffic |
-| **Trang Admin** | Quầy quản lý | <http://localhost:8080/admin.html> (nút **Admin** trên navbar) | **Chưa có** (làm sau) | Thêm / sửa / xoá sản phẩm, chỉnh tồn kho; mục **Monitoring** mở các tool bên dưới ở tab mới |
+| **Trang Admin** | Quầy quản lý | <http://localhost:8080/login.html> (nút **Đăng nhập** trên navbar) → <http://localhost:8080/admin.html> | `ADMIN_USERNAME` / `ADMIN_PASSWORD` trong `.env` (chỉ dùng lần tạo đầu; sau đó đổi trong trang admin) | Thêm / sửa / xoá sản phẩm, chỉnh tồn kho, đổi mật khẩu; mục **Monitoring** mở các tool bên dưới ở tab mới |
 | **Grafana** | Bảng điều khiển | <http://localhost:3001> | `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD` trong `.env` | **Demo, theo dõi hằng ngày** (dashboard Shop Overview) |
 | **Prometheus — gõ PromQL** | Sổ ghi số | <http://localhost:9090/query> | Không cần (chỉ mở trên máy này) | Tra cứu, thử query |
 | **Prometheus — danh sách target** | | <http://localhost:9090/targets> | | Xem 6 nơi Prometheus đi lấy số có **UP** không |
@@ -69,6 +69,7 @@ Prometheus ── luật FIRING ──► Alertmanager :9093 ──► Telegram 
 | Tắt + xoá sạch dữ liệu | `docker compose down -v` |
 | Giả lập sự cố DB / khôi phục | `docker compose stop db` / `docker compose start db` |
 | Sửa `.env` xong (token, mật khẩu...) | `docker compose up -d --force-recreate <tên service>` (`restart` **không** đọc lại `.env`) |
+| Hỏi AI (HolmesGPT + Bedrock, **tốn phí**) | `docker compose run --rm holmes ask "Vì sao web lỗi 5xx?" --no-interactive` · điều tra cảnh báo: `docker compose run --rm holmes investigate alertmanager` (README mục 7.19) |
 | Bật trên EC2 có HTTPS | `docker compose -f docker-compose.yml -f docker-compose.https.yml up -d` (lần đầu xem README mục 7.10) |
 
 PromQL mẫu để thử: xem **README mục 4.3**.

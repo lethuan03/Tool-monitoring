@@ -1,5 +1,6 @@
 const mysql = require('mysql2/promise');
 const { log } = require('./logger');
+const { hashPassword, checkNewPassword } = require('./auth/password');
 
 // Connection settings come from env (.env locally, docker-compose in containers)
 const config = {
@@ -45,6 +46,30 @@ const SCHEMA = [
     quantity    INT UNSIGNED  NOT NULL,
     CONSTRAINT fk_items_order   FOREIGN KEY (order_id)   REFERENCES orders(id),
     CONSTRAINT fk_items_product FOREIGN KEY (product_id) REFERENCES products(id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+
+  // Tài khoản đăng nhập trang quản trị. Chỉ lưu hash mật khẩu (xem auth/password.js).
+  // role để sẵn cho việc thêm vai trò sau này; hiện chỉ có 'admin'.
+  `CREATE TABLE IF NOT EXISTS users (
+    id            INT UNSIGNED  NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    username      VARCHAR(50)   NOT NULL,
+    password_hash VARCHAR(255)  NOT NULL,
+    role          VARCHAR(20)   NOT NULL DEFAULT 'admin',
+    created_at    TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at    TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_users_username (username)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+
+  // Phiên đăng nhập: chỉ lưu SHA-256 của token trong cookie (xem auth/session.js).
+  // Xoá user thì phiên của user đó tự xoá theo (ON DELETE CASCADE).
+  `CREATE TABLE IF NOT EXISTS sessions (
+    token_hash  CHAR(64)      NOT NULL PRIMARY KEY,
+    user_id     INT UNSIGNED  NOT NULL,
+    expires_at  DATETIME      NOT NULL,
+    created_at  TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY idx_sessions_user (user_id),
+    KEY idx_sessions_expires (expires_at),
+    CONSTRAINT fk_sessions_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`
 ];
 
@@ -83,6 +108,30 @@ async function seed() {
   log.info('db_seeded', { products: sample.length });
 }
 
+// --- Tạo sẵn 1 tài khoản admin nếu DB chưa có admin nào ---
+// Lấy từ ADMIN_USERNAME / ADMIN_PASSWORD (.env). CHỈ dùng ở lần tạo đầu:
+// đã có admin thì bỏ qua, nên đổi ADMIN_PASSWORD trong .env sau đó KHÔNG đổi
+// được mật khẩu — đổi trong trang quản trị (mục "Đổi mật khẩu").
+async function seedAdmin() {
+  const [[{ c }]] = await pool.query("SELECT COUNT(*) AS c FROM users WHERE role = 'admin'");
+  if (c > 0) return;
+
+  const username = String(process.env.ADMIN_USERNAME || 'admin').trim();
+  const password = process.env.ADMIN_PASSWORD || '';
+  if (!/^[A-Za-z0-9_.-]{3,50}$/.test(username)) {
+    throw new Error('ADMIN_USERNAME chỉ gồm chữ, số, _ . - và dài 3-50 ký tự');
+  }
+  const problem = checkNewPassword(password);
+  if (problem) throw new Error(`ADMIN_PASSWORD không hợp lệ: ${problem}`);
+
+  await pool.query("INSERT INTO users (username, password_hash, role) VALUES (?, ?, 'admin')", [
+    username,
+    await hashPassword(password),
+  ]);
+  // Không ghi mật khẩu ra log
+  log.info('admin_seeded', { username });
+}
+
 // --- Wait for MySQL to accept connections (container start order, restarts) ---
 async function waitForDb(retries = Number(process.env.DB_CONNECT_RETRIES) || 30, delayMs = 2000) {
   for (let attempt = 1; ; attempt++) {
@@ -107,6 +156,7 @@ async function initDb() {
   for (const stmt of SCHEMA) await pool.query(stmt);
   await migrate();
   await seed();
+  await seedAdmin();
   log.info('db_connected', { host: config.host, port: config.port, database: config.database });
 }
 

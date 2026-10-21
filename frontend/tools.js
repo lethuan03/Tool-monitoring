@@ -60,15 +60,29 @@ function renderTools(config, root) {
     img.height = 48;
     card.appendChild(img);
 
+    // Tên + địa chỉ (host:cổng/đường dẫn) để biết tool đang chạy ở đâu
+    const text = document.createElement('span');
+    text.className = 'tool-text';
     const name = document.createElement('span');
     name.className = 'tool-name';
     name.textContent = tool.name;
-    card.appendChild(name);
+    const url = document.createElement('span');
+    url.className = 'tool-url';
+    url.textContent = card.href.replace(/^https?:\/\//, '');
+    text.append(name, url);
+    card.appendChild(text);
 
     const hint = document.createElement('span');
     hint.className = 'visually-hidden'; // class ẩn-cho-screen-reader của Tabler/Bootstrap
     hint.textContent = ' (mở tab mới)';
     card.appendChild(hint);
+
+    // Mũi tên ↗: admin.js chèn icon SVG vào thẻ có data-icon
+    const arrow = document.createElement('span');
+    arrow.className = 'tool-arrow';
+    arrow.dataset.icon = 'arrowUpRight';
+    arrow.setAttribute('aria-hidden', 'true');
+    card.appendChild(arrow);
 
     root.appendChild(card);
   });

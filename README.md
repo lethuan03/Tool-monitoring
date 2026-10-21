@@ -43,7 +43,7 @@ Sau khoảng 30–60 giây:
 | Mở gì       | Địa chỉ                         |
 | ----------- | ------------------------------- |
 | Trang web   | <http://localhost:8080> (hoặc port bạn đặt ở `HTTP_PORT`) |
-| **Trang Admin** (nút **Admin** trên navbar shop) | <http://localhost:8080/admin.html> — thêm / sửa / xoá sản phẩm, mục **Monitoring** có link tới mọi tool bên dưới. **Chưa có đăng nhập**: ai mở được trang là sửa được sản phẩm. Đổi cổng tool trong `.env` thì sửa `TOOL_CONFIG` trong `frontend/tools.js` rồi `docker compose up -d --build frontend` |
+| **Trang Admin** (nút **Đăng nhập** trên navbar shop) | <http://localhost:8080/login.html> → đăng nhập bằng `ADMIN_USERNAME` / `ADMIN_PASSWORD` trong `.env` → vào <http://localhost:8080/admin.html>: thêm / sửa / xoá sản phẩm, đổi mật khẩu, mục **Monitoring** có link tới mọi tool bên dưới. Chưa đăng nhập thì `/admin.html` tự chuyển sang trang đăng nhập (xem mục 7.17). Đổi cổng tool trong `.env` thì sửa `TOOL_CONFIG` trong `frontend/tools.js` rồi `docker compose up -d --build frontend` |
 | **Grafana (màn hình theo dõi chính)** | <http://localhost:3001> — đăng nhập bằng `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD` trong `.env`, mở ra là dashboard **Shop Overview**. Dashboard log: **Shop Logs** (menu Dashboards → thư mục Shop) |
 | Prometheus (dành cho kỹ thuật, tra cứu/gỡ lỗi) | <http://localhost:9090>         |
 | Loki (log — kỹ thuật, bình thường xem qua Grafana) | <http://localhost:3100/ready> |
@@ -995,10 +995,113 @@ Rà lại mọi file đã thêm/sửa từ mục 7.10 đến 7.15, chạy lại 
 | 47 | Log khởi động in thêm **độ dài token** (không in token): `Kênh Telegram: BẬT (chat_id ..., token dài 46 ký tự)` | Lỗi thật đã gặp ngày 14/10: `.env` có token đủ 46 ký tự nhưng container vẫn chạy token cũ 43 ký tự (chưa `--force-recreate`). Có số này trong log là so được ngay với `.env` | `alertmanager/entrypoint.sh` |
 | 48 | Sửa các ghi chú đã cũ: "chưa có Alertmanager", "để gửi mail", "5 nơi lấy số" | Từ mục 7.14–7.15 đã có Alertmanager gửi Telegram/mail, và Prometheus lấy số ở **6** nơi (thêm node-exporter, alertmanager) | `prometheus/rules/alerts.yml`, `prometheus/prometheus.yml`, `TRA-CUU-NHANH.md`, mục 7.11 README |
 | 49 | `TRA-CUU-NHANH.md`: thêm luồng **Prometheus → Alertmanager → Telegram** và lệnh "sửa `.env` xong thì `--force-recreate`" | Để bảng tra cứu khớp với hệ thống hiện tại | `TRA-CUU-NHANH.md` |
+| 50 | Thêm `"5s"` vào `timepicker.refresh_intervals` của Shop Overview | Dashboard đặt `"refresh": "5s"` nhưng danh sách khoảng làm mới chỉ có 15s/30s/1m/5m. Grafana 11.3 thấy 5s không nằm trong danh sách nên **tắt luôn tự làm mới** (nút ghi "Auto refresh turned off"): bảng "Luật đang bị phạm" và mọi ô không cập nhật, phải F5. Đo bằng trình duyệt headless: trước khi sửa 0 lần gọi query trong 35 giây; sau khi sửa 91 lần, bảng tự hiện `TargetDown` PENDING → FIRING và tự biến mất khi bật lại exporter, không cần F5 | `grafana/dashboards/shop-overview.json` |
 
 Đã kiểm tra #46–#47: chạy Alertmanager với token cố tình kẹp dấu cách, dấu ngoặc kép và `\r` → file token còn đúng 46 ký tự, `amtool check-config` hợp lệ; không đặt kênh nào → vẫn báo lỗi rõ ràng như cũ.
 
 **Giới hạn còn lại (biết rõ, chưa làm):** nếu chính **Alertmanager hoặc Prometheus chết** thì không ai nhắn được Telegram để báo việc đó. Cách thường dùng ở production là một luật "luôn luôn kêu" (Watchdog) gửi tới một dịch vụ bên ngoài, dịch vụ đó báo động khi **không** còn nghe thấy nó nữa. Để sau khi lên EC2.
+
+### 7.17. Đăng nhập và phân quyền trang quản trị (21/10/2026)
+
+Chuẩn bị đưa web ra internet: trước đây ai biết đường dẫn cũng thêm/sửa/xoá được sản phẩm và xem được toàn bộ đơn hàng (tên + email khách).
+
+| # | Sửa gì | Vì sao | File |
+| - | ------ | ------ | ---- |
+| 51 | **Tài khoản admin tự tạo** ở lần chạy đầu từ `ADMIN_USERNAME` / `ADMIN_PASSWORD` (`.env`, bắt buộc, tối thiểu 12 ký tự). Đã có admin thì bỏ qua | Không cần thao tác tay trong DB. Mật khẩu lưu dạng hash **scrypt** có salt riêng, không bao giờ lưu mật khẩu gốc | `backend/src/db.js`, `backend/src/auth/password.js`, `docker-compose.yml`, `.env.example` |
+| 52 | **Phiên đăng nhập** bằng cookie `sid`: HttpOnly, SameSite=Strict, tự bật Secure khi chạy HTTPS, hết hạn sau 8 giờ (`SESSION_TTL_HOURS`). DB chỉ lưu SHA-256 của token | JavaScript trên trang không đọc được cookie (XSS không lấy cắp được); lộ bảng `sessions` cũng không dùng lại được phiên | `backend/src/auth/session.js`, bảng `users`, `sessions` |
+| 53 | **Phân quyền API**: `POST/PUT/DELETE /api/products` và `GET /api/orders*` chỉ admin (401 / 403). Xem sản phẩm và **đặt hàng vẫn công khai** | Quyền tối thiểu: khách chỉ cần xem và mua | `backend/src/auth/middleware.js`, `routes/products.js`, `routes/orders.js` |
+| 54 | **Chống CSRF**: request ghi/xoá có `Origin` khác tên miền hoặc `Sec-Fetch-Site: cross-site` → 403. Bỏ `cors()` (trước đây cho mọi trang web gọi API), gỡ luôn thư viện `cors` | Trang lạ không gửi được request thay admin đang đăng nhập | `backend/src/auth/http.js`, `backend/src/server.js`, `backend/package.json` |
+| 55 | **Chống dò mật khẩu**: sai 5 lần / 15 phút (theo IP và theo tên đăng nhập) → khoá 15 phút (429). Một thông báo chung "Sai tên đăng nhập hoặc mật khẩu"; tên không tồn tại cũng tốn đúng thời gian như sai mật khẩu | Không dò được mật khẩu, không đoán được tài khoản nào tồn tại | `backend/src/auth/rate-limit.js`, `backend/src/routes/auth.js` |
+| 56 | **nginx `auth_request`**: chưa đăng nhập thì `/admin.html`, `admin.js`, `admin.css`, `tools.js` trả **302 → /login.html**, file không được gửi đi. Trang admin gắn `Cache-Control: no-store` | Lớp chặn thứ 2 ngay ở cửa vào; đăng xuất rồi bấm Back không xem lại được | `nginx/snippets/app-locations.conf` (dùng chung HTTP + HTTPS) |
+| 57 | **Trang đăng nhập** `login.html` (giao diện Tabler); trang admin có tên tài khoản, nút Đăng xuất, mục **Đổi mật khẩu** (đổi xong đăng xuất mọi máy khác); phiên hết hạn giữa chừng tự về trang đăng nhập | | `frontend/login.html`, `login.js`, `admin.html`, `admin.js` |
+| 58 | **Navbar shop**: bỏ link vào thẳng `/admin.html`. Khách thấy **Đăng nhập**; admin đã đăng nhập thấy **Quản trị** + **Đăng xuất** | `/api/auth/me` luôn trả 200 nên không làm tăng ô 4xx trên dashboard | `frontend/index.html`, `app.js`, `styles.css` |
+| 59 | `absolute_redirect off` cho chuyển hướng về trang đăng nhập | Lỗi thật gặp khi test: nginx ghép `Location: http://localhost/login.html` theo cổng **trong container** (80), trình duyệt vào bằng 8080 nên bị đẩy sang trang lỗi | `nginx/snippets/app-locations.conf` |
+
+**Log:** ghi sự kiện `login_success`, `login_failed` (kèm lý do `wrong_password` / `unknown_user`), `login_locked`, `password_changed`, `admin_seeded`. Không ghi mật khẩu, không ghi tên người dùng gõ thử.
+
+**Đã kiểm tra trên Docker Compose local:** 16 test đơn vị (`npm test`); 48 mục kiểm tra API qua nginx (chưa đăng nhập bị chặn đúng 401/302, đăng nhập đúng/sai, CSRF 403, CRUD, đổi mật khẩu đá máy khác ra, đăng xuất, khoá sau 5 lần sai, log không chứa mật khẩu); 15 mục giao diện bằng trình duyệt headless (navbar, chuyển hướng, đăng nhập, trang admin, đăng xuất, không lỗi JavaScript). Prometheus vẫn đủ 6 target UP, `/metrics` vẫn 404.
+
+**Lưu ý vận hành:**
+- Sửa `ADMIN_PASSWORD` trong `.env` **sau** lần tạo đầu không có tác dụng: đổi trong trang admin → **Đổi mật khẩu**.
+- Quên mật khẩu: xoá tài khoản (`DELETE FROM users WHERE username='admin';` bằng user root của MySQL) rồi `docker compose restart backend` để tạo lại từ `.env`.
+- Bộ đếm chống dò nằm trong bộ nhớ backend: lỡ bị khoá khi đang test thì `docker compose restart backend` là mở.
+- Lên internet **bắt buộc dùng HTTPS** (`docker-compose.https.yml`): HTTP thường thì mật khẩu và cookie đi qua mạng dạng chữ thường.
+
+### 7.18. Làm lại giao diện shop, trang đăng nhập và trang quản trị (21/10/2026)
+
+| # | Sửa gì | File |
+| - | ------ | ---- |
+| 60 | **Shop** chuyển sang giao diện sáng kiểu cửa hàng: thanh thông báo, navbar dính trên cùng, hero 2 cột có ảnh, 4 thẻ ưu điểm dùng icon SVG thay emoji, thẻ sản phẩm ảnh vuông (nhãn chỉ hiện khi sắp hết / hết hàng), footer nhiều cột, giỏ hàng có icon trống. Font **Be Vietnam Pro** (thiết kế cho tiếng Việt) | `frontend/index.html`, `styles.css`, `app.js` |
+| 61 | **Trang quản trị** (vẫn template Tabler): sidebar tối chia nhóm, nội dung sáng, thẻ thống kê có icon (thêm tổng trị giá tồn kho), bảng có ô tìm kiếm có icon và nút Sửa/Xoá dạng icon, hộp thoại 2 cột có khung xem trước ảnh, mục Monitoring hiện cả địa chỉ của tool. Icon là SVG bộ Tabler Icons (MIT) vẽ sẵn trong `admin.js`, không tải thêm gì | `frontend/admin.html`, `admin.css`, `admin.js`, `tools.js` |
+| 62 | **Trang đăng nhập** chia đôi: bên trái giới thiệu, bên phải form; nút Hiện/Ẩn mật khẩu. CSS để ngay trong trang vì `admin.css` bị nginx chặn khi chưa đăng nhập | `frontend/login.html`, `login.js` |
+| 63 | Điện thoại (390px): không trang nào bị tràn ngang. Bảng sản phẩm tự cuộn ngang trong khung (`.page-wrapper { min-width: 0 }`, `.table-responsive { position: relative }`); navbar shop ẩn bớt chữ | `admin.css`, `styles.css` |
+
+**Đã kiểm tra:** 21 bước chức năng bằng trình duyệt headless (thêm giỏ, tăng/xoá, đăng nhập, thêm/tìm/sửa/xoá sản phẩm qua giao diện, Monitoring, đăng xuất), không lỗi JavaScript; 16 + 6 test đơn vị; file admin vẫn 302 khi chưa đăng nhập, `/metrics` vẫn 404.
+
+### 7.19. HolmesGPT + AWS Bedrock: AI điều tra sự cố (bước 7–8, chạy local)
+
+```
+Bạn: docker compose run --rm holmes ask "..."
+        │
+        ▼
+HolmesGPT (container, mạng appnet) ──PromQL──► Prometheus :9090
+        │                          ──LogQL───► Loki :3100
+        │                          ──API─────► Alertmanager :9093
+        │  gửi câu hỏi + số liệu/log đã lấy
+        ▼
+AWS Bedrock (model Claude) ── suy luận ──► trả lời: nguyên nhân + nên làm gì
+```
+
+HolmesGPT tự quyết định cần tra gì, tự chạy PromQL/LogQL, rồi gửi kết quả cho model trên Bedrock suy luận. Bedrock không truy cập thẳng vào hệ thống, chỉ nhận đoạn chữ HolmesGPT gửi lên.
+
+| Thêm gì | File |
+| ------- | ---- |
+| Image HolmesGPT `0.45.0` build từ PyPI (ghim phiên bản), chạy bằng user thường | `holmes/Dockerfile` |
+| Script khởi động: bỏ biến AWS trống / ký tự thừa, **dừng nếu chưa có khoá** (không gọi Bedrock), in cách đăng nhập đang dùng (không in khoá) | `holmes/entrypoint.sh` |
+| Toolset Prometheus, Loki, địa chỉ Alertmanager, `max_steps: 15` (giới hạn số lượt gọi Bedrock cho 1 câu hỏi) | `holmes/config.yaml` |
+| Service `holmes`, **profile `ai`**: `docker compose up -d` không bật nó, chỉ chạy khi gọi | `docker-compose.yml` |
+| Biến Bedrock | `.env.example`, `.env` |
+
+**Biến trong `.env`:**
+
+| Biến | Ý nghĩa |
+| ---- | ------- |
+| `BEDROCK_REGION` | Region có model đã bật quyền, ví dụ `us-east-1` |
+| `BEDROCK_MODEL_ID` | Model ID hoặc inference profile ID, **không** ghi tiền tố `bedrock/` (compose tự thêm) |
+| `AWS_BEARER_TOKEN_BEDROCK` | Cách 1: Bedrock API key |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` | Cách 2: access key IAM (session token chỉ khi là khoá tạm) |
+
+Điền **một** trong hai cách. Có cả hai thì API key được ưu tiên trong thông báo khởi động; nên để trống cách không dùng.
+
+**Cách chạy (PowerShell, thư mục gốc dự án):**
+
+```powershell
+# Lần đầu, hoặc sau khi sửa holmes/Dockerfile
+docker compose --profile ai build holmes
+
+# Hỏi tự do
+docker compose run --rm holmes ask "Vì sao web đang trả lỗi 5xx?" --no-interactive
+
+# Điều tra toàn bộ cảnh báo đang FIRING trên Alertmanager
+docker compose run --rm holmes investigate alertmanager
+
+# Chỉ 1 cảnh báo
+docker compose run --rm holmes investigate alertmanager --alertmanager-alertname MySQLDown
+
+# Kiểm tra kết nối toolset (KHÔNG gọi Bedrock, không tốn tiền)
+docker compose run --rm --no-deps --entrypoint holmes holmes toolset list
+```
+
+Diễn tập gợi ý: `docker compose stop db`, đợi khoảng 1,5 phút để `MySQLDown` FIRING, chạy `investigate alertmanager --alertmanager-alertname MySQLDown`, xong thì `docker compose start db`. Tin Telegram vẫn gửi như bình thường.
+
+**Đã kiểm tra (không gọi Bedrock):** build image thành công; `toolset list` báo `prometheus/metrics` và `grafana/loki` ✅ (kết nối được qua mạng nội bộ); chưa điền khoá thì container dừng với thông báo rõ ràng; `docker compose up -d` không bật service `holmes`. **Chưa kiểm tra** lượt gọi Bedrock thật (cần khoá và tốn phí).
+
+**Lưu ý:**
+- **Chi phí:** Bedrock tính theo token. Một câu hỏi thường gồm nhiều lượt gọi (tối đa `max_steps`). Nên đặt AWS Budgets cảnh báo chi phí.
+- **Dữ liệu ra ngoài:** số liệu và log (có IP, user-agent của khách trong log nginx) được gửi lên Bedrock. Bedrock không dùng dữ liệu này để huấn luyện model, nhưng dữ liệu vẫn rời khỏi máy.
+- **Quyền IAM tối thiểu:** chỉ `bedrock:InvokeModel` và `bedrock:InvokeModelWithResponseStream` trên đúng inference profile + foundation model đang dùng. Không cần `AmazonBedrockFullAccess`.
+- **Lỗi hay gặp:** `AccessDeniedException` = chưa bật quyền dùng model (Model access, lần đầu dùng Claude phải gửi form use case) hoặc IAM thiếu quyền; `ValidationException ... model identifier` = sai `BEDROCK_MODEL_ID` hoặc model không có ở region đó. Sửa `.env` xong không cần build lại, chỉ chạy lại lệnh `run`.
+- Bản 0.45.0 chỉ đọc cấu hình ở `~/.holmes/config.yaml` (biến `HOLMES_CONFIG_PATH` trong tài liệu của HolmesGPT không có tác dụng), nên compose mount file vào đúng chỗ đó.
 
 ---
 
@@ -1107,16 +1210,25 @@ Cách này **chỉ có API** tại <http://localhost:3000/api/products>. Giao di
 
 ## 10. API
 
-| Method | Endpoint             | Mô tả                                   |
-| ------ | -------------------- | --------------------------------------- |
-| GET    | `/api/products`      | Danh sách sản phẩm                      |
-| GET    | `/api/products/:id`  | Chi tiết 1 sản phẩm                     |
-| POST   | `/api/products`      | Thêm sản phẩm `{name, price, ...}`      |
-| GET    | `/api/orders`        | Danh sách đơn hàng                      |
-| GET    | `/api/orders/:id`    | Chi tiết 1 đơn hàng                     |
-| POST   | `/api/orders`        | Đặt hàng `{customer, email, items[]}`   |
-| GET    | `/health`            | Kiểm tra sống/chết (Docker healthcheck dùng) |
-| GET    | `/metrics`           | Số liệu cho Prometheus — **chỉ nội bộ**, gọi từ ngoài qua Nginx trả 404 |
+**Ai gọi được:** "Công khai" = mọi người. "Admin" = phải đăng nhập tài khoản admin (cookie `sid`), chưa đăng nhập trả **401**; request ghi/xoá đến từ trang web khác trả **403**.
+
+| Method | Endpoint             | Ai gọi được | Mô tả                                   |
+| ------ | -------------------- | ----------- | --------------------------------------- |
+| GET    | `/api/products`      | Công khai | Danh sách sản phẩm                      |
+| GET    | `/api/products/:id`  | Công khai | Chi tiết 1 sản phẩm                     |
+| POST   | `/api/products`      | **Admin** | Thêm sản phẩm `{name, price, stock, image, description}` |
+| PUT    | `/api/products/:id`  | **Admin** | Sửa sản phẩm                            |
+| DELETE | `/api/products/:id`  | **Admin** | Xoá mềm (ẩn khỏi shop, đơn cũ giữ nguyên) |
+| GET    | `/api/orders`        | **Admin** | Danh sách đơn hàng (có tên + email khách) |
+| GET    | `/api/orders/:id`    | **Admin** | Chi tiết 1 đơn hàng                     |
+| POST   | `/api/orders`        | Công khai | Đặt hàng `{customer, email, items[]}`   |
+| POST   | `/api/auth/login`    | Công khai | Đăng nhập `{username, password}` → đặt cookie `sid`. Sai 5 lần / 15 phút → **429** |
+| POST   | `/api/auth/logout`   | Công khai | Đăng xuất (xoá phiên)                   |
+| GET    | `/api/auth/me`       | Công khai | Đang đăng nhập không. Luôn trả 200      |
+| GET    | `/api/auth/check`    | Nội bộ    | nginx `auth_request` dùng để chặn `/admin.html` (204 / 401) |
+| POST   | `/api/auth/password` | **Admin** | Đổi mật khẩu `{currentPassword, newPassword}`; đăng xuất mọi máy khác |
+| GET    | `/health`            | Công khai | Kiểm tra sống/chết (Docker healthcheck dùng) |
+| GET    | `/metrics`           | Nội bộ    | Số liệu cho Prometheus, gọi từ ngoài qua Nginx trả 404 |
 
 ```bash
 curl -X POST http://localhost:8080/api/orders \

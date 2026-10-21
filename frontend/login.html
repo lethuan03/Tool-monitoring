@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="robots" content="noindex" />
+  <title>Đăng nhập quản trị — Nova Store</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <!-- Template Tabler (MIT), lưu sẵn trong vendor/tabler/ giống trang admin -->
+  <link rel="stylesheet" href="vendor/tabler/tabler.min.css?v=1.6.1" />
+  <!-- CSS riêng để ngay đây: admin.css bị nginx chặn khi chưa đăng nhập -->
+  <style>
+    :root {
+      --tblr-primary: #4f46e5; --tblr-primary-rgb: 79, 70, 229; --tblr-primary-darken: #4338ca;
+      --tblr-link-color: #4f46e5; --tblr-link-color-rgb: 79, 70, 229;
+      --tblr-font-sans-serif: "Be Vietnam Pro", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    }
+    body { -webkit-font-smoothing: antialiased; }
+    .auth { display: grid; grid-template-columns: 1fr 1fr; min-height: 100vh; }
+    .auth-side {
+      position: relative; overflow: hidden; display: flex; flex-direction: column; justify-content: space-between;
+      padding: 48px; color: #e2e8f0;
+      background:
+        radial-gradient(600px 400px at 100% 0%, rgba(99, 102, 241, 0.45), transparent 60%),
+        radial-gradient(500px 360px at 0% 100%, rgba(6, 182, 212, 0.30), transparent 60%),
+        #0f172a;
+    }
+    .auth-brand { display: inline-flex; align-items: center; gap: 10px; color: #fff; font-weight: 800; font-size: 22px; text-decoration: none; letter-spacing: -0.3px; }
+    .auth-brand:hover { color: #fff; text-decoration: none; }
+    .auth-brand span.accent { color: #a5b4fc; margin-left: -6px; }
+    .auth-mark { display: inline-grid; place-items: center; width: 36px; height: 36px; border-radius: 10px; background: linear-gradient(135deg, #6366f1, #06b6d4); }
+    .auth-side h1 { color: #fff; font-size: 34px; font-weight: 800; line-height: 1.2; letter-spacing: -0.6px; margin-bottom: 14px; }
+    .auth-side p { color: #94a3b8; font-size: 16px; max-width: 420px; }
+    .auth-points { list-style: none; padding: 0; margin: 28px 0 0; display: grid; gap: 12px; }
+    .auth-points li { display: flex; align-items: center; gap: 10px; color: #cbd5e1; }
+    .auth-points svg { color: #34d399; flex: none; }
+    .auth-foot { font-size: 13px; color: #64748b; }
+    .auth-main { display: flex; align-items: center; justify-content: center; padding: 40px 24px; background: #f5f6fa; }
+    .auth-card { width: 100%; max-width: 400px; }
+    .auth-card h2 { font-size: 26px; font-weight: 800; letter-spacing: -0.4px; margin-bottom: 4px; }
+    .auth-card .form-control { padding-top: 10px; padding-bottom: 10px; }
+    .auth-card .btn-primary { padding-top: 11px; padding-bottom: 11px; font-weight: 600; }
+    .pw-wrap { position: relative; }
+    .pw-toggle {
+      position: absolute; top: 50%; right: 6px; transform: translateY(-50%);
+      border: none; background: none; padding: 6px 8px; border-radius: 8px; color: #64748b; font-size: 13px; font-weight: 600; cursor: pointer;
+    }
+    .pw-toggle:hover { color: #4f46e5; background: #eef2ff; }
+    .auth-card .pw-wrap .form-control { padding-right: 64px; }
+    @media (max-width: 860px) {
+      .auth { grid-template-columns: 1fr; }
+      .auth-side { padding: 28px 24px; }
+      .auth-side .auth-hide-sm { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="auth">
+    <section class="auth-side" aria-label="Giới thiệu">
+      <a href="/" class="auth-brand">
+        <span class="auth-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="#fff"><path d="M12 2 22 12 12 22 2 12z"/></svg>
+        </span>
+        Nova <span class="accent">Store</span>
+      </a>
+      <div class="auth-hide-sm">
+        <h1>Quản lý cửa hàng<br />ở một nơi</h1>
+        <p>Thêm sản phẩm, cập nhật giá và tồn kho, theo dõi hệ thống qua Grafana và Prometheus.</p>
+        <ul class="auth-points">
+          <li><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 5 5L20 7"/></svg>Quản lý sản phẩm và tồn kho</li>
+          <li><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 5 5L20 7"/></svg>Lối tắt tới các tool monitoring</li>
+          <li><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 5 5L20 7"/></svg>Phiên đăng nhập tự hết hạn sau 8 giờ</li>
+        </ul>
+      </div>
+      <div class="auth-foot auth-hide-sm">© 2026 Nova Store</div>
+    </section>
+
+    <main class="auth-main">
+      <div class="auth-card">
+        <h2>Đăng nhập quản trị</h2>
+        <p class="text-secondary mb-4">Chỉ dành cho quản trị viên cửa hàng.</p>
+
+        <div id="loginError" class="alert alert-danger d-none" role="alert"></div>
+
+        <form id="loginForm" novalidate>
+          <div class="mb-3">
+            <label class="form-label" for="username">Tên đăng nhập</label>
+            <input id="username" name="username" class="form-control" autocomplete="username"
+                   maxlength="50" required autofocus />
+          </div>
+          <div class="mb-4">
+            <label class="form-label" for="password">Mật khẩu</label>
+            <div class="pw-wrap">
+              <input id="password" name="password" type="password" class="form-control"
+                     autocomplete="current-password" maxlength="200" required />
+              <button type="button" class="pw-toggle" id="pwToggle" aria-controls="password" aria-pressed="false">Hiện</button>
+            </div>
+          </div>
+          <button type="submit" class="btn btn-primary w-100" id="loginBtn">Đăng nhập</button>
+        </form>
+
+        <div class="text-center mt-4">
+          <a href="/" class="link-secondary">← Về cửa hàng</a>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="login.js?v=20261021-3"></script>
+</body>
+</html>

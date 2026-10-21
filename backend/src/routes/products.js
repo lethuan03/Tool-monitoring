@@ -1,6 +1,7 @@
 const express = require('express');
 const { pool } = require('../db');
 const { validateProduct, parseId } = require('../validate-product');
+const { requireAdmin } = require('../auth/middleware');
 
 const router = express.Router();
 
@@ -16,9 +17,8 @@ async function findActive(id) {
   return rows[0] || null;
 }
 
-// LƯU Ý BẢO MẬT: POST/PUT/DELETE chưa có đăng nhập / phân quyền (trang admin
-// đang để mở theo yêu cầu). Chạy trên EC2 public thì ai cũng sửa/xoá được
-// sản phẩm. Phải thêm xác thực trước khi dùng thật.
+// Phân quyền: GET công khai (khách xem hàng). POST/PUT/DELETE chỉ admin đã
+// đăng nhập (requireAdmin, xem auth/middleware.js).
 
 // GET /api/products - list all (active) products
 router.get(
@@ -43,6 +43,7 @@ router.get(
 // POST /api/products - create a product (trang admin)
 router.post(
   '/',
+  requireAdmin,
   asyncHandler(async (req, res) => {
     const { value, error } = validateProduct(req.body);
     if (error) return res.status(400).json({ error });
@@ -58,6 +59,7 @@ router.post(
 // PUT /api/products/:id - sửa toàn bộ thông tin sản phẩm (trang admin)
 router.put(
   '/:id',
+  requireAdmin,
   asyncHandler(async (req, res) => {
     const id = parseId(req.params.id);
     if (!id) return res.status(404).json({ error: 'Product not found' });
@@ -78,6 +80,7 @@ router.put(
 // Xoá mềm: active = 0. Lý do xem migrate() trong db.js.
 router.delete(
   '/:id',
+  requireAdmin,
   asyncHandler(async (req, res) => {
     const id = parseId(req.params.id);
     if (!id) return res.status(404).json({ error: 'Product not found' });

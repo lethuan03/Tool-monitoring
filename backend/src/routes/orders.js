@@ -1,9 +1,14 @@
 const express = require('express');
 const { pool } = require('../db');
 
+const { requireAdmin } = require('../auth/middleware');
+
 const router = express.Router();
 
 const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+// Phân quyền: xem đơn hàng (có tên + email khách) chỉ admin. Đặt hàng (POST)
+// vẫn công khai cho khách.
 
 async function fetchOrderWithItems(executor, orderId) {
   const [[order]] = await executor.query('SELECT * FROM orders WHERE id = ?', [orderId]);
@@ -19,6 +24,7 @@ async function fetchOrderWithItems(executor, orderId) {
 // GET /api/orders - list orders with their items
 router.get(
   '/',
+  requireAdmin,
   asyncHandler(async (req, res) => {
     const [orders] = await pool.query('SELECT * FROM orders ORDER BY id DESC');
     const result = [];
@@ -36,6 +42,7 @@ router.get(
 // GET /api/orders/:id - single order
 router.get(
   '/:id',
+  requireAdmin,
   asyncHandler(async (req, res) => {
     const order = await fetchOrderWithItems(pool, req.params.id);
     if (!order) return res.status(404).json({ error: 'Order not found' });

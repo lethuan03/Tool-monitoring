@@ -3,45 +3,75 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Admin — Nova Store</title>
+  <meta name="robots" content="noindex" />
+  <title>Quản trị — Nova Store</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
   <!-- Giao diện dùng template Tabler v1.6.1 (MIT, https://tabler.io), lưu sẵn trong
-       vendor/tabler/ để không phụ thuộc CDN. Chỉ dùng CSS, không dùng JS của Tabler. -->
+       vendor/tabler/ để không phụ thuộc CDN. Chỉ dùng CSS, không dùng JS của Tabler.
+       Icon là SVG theo bộ Tabler Icons (MIT), vẽ sẵn trong admin.js. -->
   <link rel="stylesheet" href="vendor/tabler/tabler.min.css?v=1.6.1" />
   <!-- ?v=...: đổi số này mỗi lần sửa CSS/JS để trình duyệt tải bản mới thay vì dùng cache cũ -->
-  <link rel="stylesheet" href="admin.css?v=20261016-1" />
+  <link rel="stylesheet" href="admin.css?v=20261021-5" />
 </head>
-<body data-bs-theme="dark">
-  <!-- LƯU Ý: trang admin CHƯA có đăng nhập / phân quyền (để làm sau).
-       Ai mở được trang này là thêm / sửa / xoá được sản phẩm. -->
+<body>
+  <!-- Trang này yêu cầu đăng nhập admin: nginx chặn file khi chưa đăng nhập
+       (auth_request), backend chặn mọi API thêm/sửa/xoá (requireAdmin). -->
   <div class="page">
-    <!-- Sidebar -->
-    <aside class="navbar navbar-vertical navbar-expand-lg" aria-label="Menu quản trị">
+    <!-- ============ SIDEBAR ============ -->
+    <aside class="navbar navbar-vertical navbar-expand-lg admin-sidebar" data-bs-theme="dark" aria-label="Menu quản trị">
       <div class="container-fluid">
         <a href="#products" class="navbar-brand admin-brand">
-          <span class="admin-brand-mark">◆</span> Nova<span class="text-cyan">Store</span>
-          <span class="badge bg-primary-lt ms-2">Admin</span>
+          <span class="admin-brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 2 22 12 12 22 2 12z"/></svg>
+          </span>
+          Nova<span class="admin-brand-accent">Store</span>
+          <span class="admin-brand-tag">Admin</span>
         </a>
         <div class="navbar-collapse" id="sidebar-menu">
-          <ul class="navbar-nav pt-lg-3">
+          <div class="admin-nav-label">Quản lý</div>
+          <ul class="navbar-nav">
             <li class="nav-item">
               <a class="nav-link" href="#products" data-section="products">
-                <span class="nav-link-icon" aria-hidden="true">📦</span>
+                <span class="nav-link-icon" data-icon="package" aria-hidden="true"></span>
                 <span class="nav-link-title">Sản phẩm</span>
               </a>
             </li>
             <li class="nav-item">
               <a class="nav-link" href="#monitoring" data-section="monitoring">
-                <span class="nav-link-icon" aria-hidden="true">📈</span>
+                <span class="nav-link-icon" data-icon="activity" aria-hidden="true"></span>
                 <span class="nav-link-title">Monitoring</span>
+              </a>
+            </li>
+          </ul>
+          <div class="admin-nav-label">Tài khoản</div>
+          <ul class="navbar-nav">
+            <li class="nav-item">
+              <a class="nav-link" href="#account" data-section="account">
+                <span class="nav-link-icon" data-icon="key" aria-hidden="true"></span>
+                <span class="nav-link-title">Đổi mật khẩu</span>
               </a>
             </li>
             <li class="nav-item">
               <a class="nav-link" href="/">
-                <span class="nav-link-icon" aria-hidden="true">🏪</span>
+                <span class="nav-link-icon" data-icon="store" aria-hidden="true"></span>
                 <span class="nav-link-title">Về cửa hàng</span>
               </a>
             </li>
           </ul>
+
+          <div class="admin-user">
+            <span class="avatar avatar-sm admin-avatar" id="adminAvatar" aria-hidden="true">A</span>
+            <div class="admin-user-text">
+              <div class="admin-user-name" id="adminName">…</div>
+              <div class="admin-user-role">Quản trị viên</div>
+            </div>
+            <button type="button" class="btn btn-icon btn-ghost-secondary admin-logout" id="logoutBtn"
+                    aria-label="Đăng xuất" title="Đăng xuất">
+              <span data-icon="logout" aria-hidden="true"></span>
+            </button>
+          </div>
         </div>
       </div>
     </aside>
@@ -51,13 +81,21 @@
       <section id="section-products" data-section-panel="products" aria-labelledby="products-title">
         <div class="page-header d-print-none">
           <div class="container-xl">
-            <div class="row g-2 align-items-center">
-              <div class="col">
+            <div class="row g-3 align-items-center">
+              <div class="col-12 col-md">
                 <div class="page-pretitle">Quản lý</div>
-                <h2 class="page-title" id="products-title">Sản phẩm</h2>
+                <h1 class="page-title" id="products-title">Sản phẩm</h1>
+                <div class="text-secondary mt-1">Thêm sản phẩm mới, sửa giá và tồn kho</div>
               </div>
-              <div class="col-auto ms-auto">
-                <button type="button" class="btn btn-primary" id="addBtn">＋ Thêm sản phẩm</button>
+              <div class="col-12 col-md-auto ms-md-auto d-flex flex-wrap gap-2">
+                <a href="/" class="btn btn-outline-secondary" target="_blank" rel="noopener">
+                  <span data-icon="external" aria-hidden="true"></span>
+                  Xem cửa hàng<span class="visually-hidden"> (mở tab mới)</span>
+                </a>
+                <button type="button" class="btn btn-primary" id="addBtn">
+                  <span data-icon="plus" aria-hidden="true"></span>
+                  Thêm sản phẩm
+                </button>
               </div>
             </div>
           </div>
@@ -69,46 +107,72 @@
             <div id="notice" role="status" aria-live="polite"></div>
 
             <!-- Thống kê nhanh (tính từ danh sách sản phẩm) -->
-            <div class="row row-deck row-cards mb-3">
-              <div class="col-6 col-lg-3">
-                <div class="card card-sm"><div class="card-body">
-                  <div class="subheader">Sản phẩm</div>
-                  <div class="h1 mb-0" id="statCount">–</div>
-                </div></div>
+            <div class="row row-cards row-deck mb-4">
+              <div class="col-sm-6 col-xl-3">
+                <div class="card card-sm admin-stat">
+                  <div class="card-body d-flex align-items-center gap-3">
+                    <span class="avatar admin-stat-icon admin-stat-primary" data-icon="package" aria-hidden="true"></span>
+                    <div>
+                      <div class="admin-stat-value" id="statCount">–</div>
+                      <div class="text-secondary">Sản phẩm đang bán</div>
+                    </div>
+                  </div>
+                </div>
               </div>
-              <div class="col-6 col-lg-3">
-                <div class="card card-sm"><div class="card-body">
-                  <div class="subheader">Tổng tồn kho</div>
-                  <div class="h1 mb-0" id="statStock">–</div>
-                </div></div>
+              <div class="col-sm-6 col-xl-3">
+                <div class="card card-sm admin-stat">
+                  <div class="card-body d-flex align-items-center gap-3">
+                    <span class="avatar admin-stat-icon admin-stat-green" data-icon="boxes" aria-hidden="true"></span>
+                    <div>
+                      <div class="admin-stat-value" id="statStock">–</div>
+                      <div class="text-secondary">Tổng tồn kho</div>
+                      <div class="admin-stat-sub" id="statValue">–</div>
+                    </div>
+                  </div>
+                </div>
               </div>
-              <div class="col-6 col-lg-3">
-                <div class="card card-sm"><div class="card-body">
-                  <div class="subheader">Sắp hết (≤ 5)</div>
-                  <div class="h1 mb-0 text-warning" id="statLow">–</div>
-                </div></div>
+              <div class="col-sm-6 col-xl-3">
+                <div class="card card-sm admin-stat">
+                  <div class="card-body d-flex align-items-center gap-3">
+                    <span class="avatar admin-stat-icon admin-stat-yellow" data-icon="alert" aria-hidden="true"></span>
+                    <div>
+                      <div class="admin-stat-value" id="statLow">–</div>
+                      <div class="text-secondary">Sắp hết (≤ 5)</div>
+                    </div>
+                  </div>
+                </div>
               </div>
-              <div class="col-6 col-lg-3">
-                <div class="card card-sm"><div class="card-body">
-                  <div class="subheader">Hết hàng</div>
-                  <div class="h1 mb-0 text-danger" id="statOut">–</div>
-                </div></div>
+              <div class="col-sm-6 col-xl-3">
+                <div class="card card-sm admin-stat">
+                  <div class="card-body d-flex align-items-center gap-3">
+                    <span class="avatar admin-stat-icon admin-stat-red" data-icon="ban" aria-hidden="true"></span>
+                    <div>
+                      <div class="admin-stat-value" id="statOut">–</div>
+                      <div class="text-secondary">Hết hàng</div>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
 
             <div class="card">
-              <div class="card-header">
-                <h3 class="card-title">Danh sách sản phẩm</h3>
-                <div class="ms-auto">
+              <div class="card-header admin-card-header">
+                <div>
+                  <h2 class="card-title">Danh sách sản phẩm</h2>
+                  <div class="card-subtitle" id="tableInfo"></div>
+                </div>
+                <div class="ms-auto admin-search">
                   <label class="visually-hidden" for="search">Tìm theo tên</label>
-                  <input type="search" id="search" class="form-control form-control-sm" placeholder="Tìm theo tên…" />
+                  <div class="input-icon">
+                    <span class="input-icon-addon" data-icon="search" aria-hidden="true"></span>
+                    <input type="search" id="search" class="form-control" placeholder="Tìm theo tên…" autocomplete="off" />
+                  </div>
                 </div>
               </div>
               <div class="table-responsive">
-                <table class="table card-table table-vcenter">
+                <table class="table card-table table-vcenter table-hover admin-table">
                   <thead>
                     <tr>
-                      <th class="w-1">ID</th>
                       <th>Sản phẩm</th>
                       <th class="text-end">Giá</th>
                       <th class="text-end">Tồn kho</th>
@@ -116,7 +180,7 @@
                     </tr>
                   </thead>
                   <tbody id="productRows">
-                    <tr><td colspan="5" class="text-secondary">Đang tải…</td></tr>
+                    <tr><td colspan="4" class="text-secondary py-5 text-center">Đang tải…</td></tr>
                   </tbody>
                 </table>
               </div>
@@ -130,7 +194,8 @@
         <div class="page-header d-print-none">
           <div class="container-xl">
             <div class="page-pretitle">Hệ thống</div>
-            <h2 class="page-title" id="monitoring-title">Tool monitoring</h2>
+            <h1 class="page-title" id="monitoring-title">Tool monitoring</h1>
+            <div class="text-secondary mt-1">Mỗi tool mở ở tab mới. Các tool chỉ mở trên máy chạy Docker (127.0.0.1); trên EC2 xem qua SSH tunnel.</div>
           </div>
         </div>
         <div class="page-body">
@@ -140,6 +205,49 @@
           </div>
         </div>
       </section>
+
+      <!-- ============ ĐỔI MẬT KHẨU ============ -->
+      <section id="section-account" data-section-panel="account" aria-labelledby="account-title" hidden>
+        <div class="page-header d-print-none">
+          <div class="container-xl">
+            <div class="page-pretitle">Tài khoản</div>
+            <h1 class="page-title" id="account-title">Đổi mật khẩu</h1>
+          </div>
+        </div>
+        <div class="page-body">
+          <div class="container-xl">
+            <div class="card admin-narrow">
+              <div class="card-header">
+                <h2 class="card-title">Mật khẩu đăng nhập</h2>
+              </div>
+              <form id="passwordForm" class="card-body" novalidate>
+                <div id="passwordMsg" role="status" aria-live="polite"></div>
+                <div class="mb-3">
+                  <label class="form-label required" for="pCurrent">Mật khẩu hiện tại</label>
+                  <input id="pCurrent" type="password" class="form-control" autocomplete="current-password" maxlength="200" required />
+                </div>
+                <div class="mb-3">
+                  <label class="form-label required" for="pNew">Mật khẩu mới</label>
+                  <input id="pNew" type="password" class="form-control" autocomplete="new-password" minlength="12" maxlength="200" required aria-describedby="pNewHelp" />
+                  <div class="form-hint" id="pNewHelp">Tối thiểu 12 ký tự. Đổi xong, mọi máy khác đang đăng nhập tài khoản này sẽ bị đăng xuất.</div>
+                </div>
+                <div class="mb-4">
+                  <label class="form-label required" for="pConfirm">Nhập lại mật khẩu mới</label>
+                  <input id="pConfirm" type="password" class="form-control" autocomplete="new-password" maxlength="200" required />
+                </div>
+                <button type="submit" class="btn btn-primary" id="passwordBtn">
+                  <span data-icon="key" aria-hidden="true"></span>
+                  Đổi mật khẩu
+                </button>
+              </form>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <footer class="footer footer-transparent d-print-none">
+        <div class="container-xl text-secondary small">© 2026 Nova Store · Trang quản trị</div>
+      </footer>
     </div>
   </div>
 
@@ -147,34 +255,46 @@
   <dialog id="productDialog" class="admin-dialog" aria-labelledby="dialogTitle">
     <form id="productForm" class="modal-content" novalidate>
       <div class="modal-header">
-        <h3 class="modal-title" id="dialogTitle">Thêm sản phẩm</h3>
+        <h2 class="modal-title" id="dialogTitle">Thêm sản phẩm</h2>
         <button type="button" class="btn-close" data-close aria-label="Đóng"></button>
       </div>
       <div class="modal-body">
         <div id="formError" class="alert alert-danger d-none" role="alert"></div>
-
-        <div class="mb-3">
-          <label class="form-label required" for="fName">Tên sản phẩm</label>
-          <input id="fName" name="name" class="form-control" maxlength="255" required />
-        </div>
-        <div class="row">
-          <div class="col-sm-6 mb-3">
-            <label class="form-label required" for="fPrice">Giá (₫)</label>
-            <input id="fPrice" name="price" type="number" class="form-control" min="0" step="any" required />
+        <div class="row g-4">
+          <div class="col-md-7">
+            <div class="mb-3">
+              <label class="form-label required" for="fName">Tên sản phẩm</label>
+              <input id="fName" name="name" class="form-control" maxlength="255" required />
+            </div>
+            <div class="row">
+              <div class="col-sm-6 mb-3">
+                <label class="form-label required" for="fPrice">Giá (₫)</label>
+                <input id="fPrice" name="price" type="number" class="form-control" min="0" step="any" required inputmode="numeric" />
+              </div>
+              <div class="col-sm-6 mb-3">
+                <label class="form-label required" for="fStock">Tồn kho</label>
+                <input id="fStock" name="stock" type="number" class="form-control" min="0" step="1" required inputmode="numeric" />
+              </div>
+            </div>
+            <div class="mb-3">
+              <label class="form-label" for="fImage">Link ảnh (http/https)</label>
+              <input id="fImage" name="image" type="url" class="form-control" maxlength="512" placeholder="https://…" />
+            </div>
+            <div>
+              <label class="form-label" for="fDesc">Mô tả</label>
+              <textarea id="fDesc" name="description" class="form-control" rows="4" maxlength="5000"></textarea>
+            </div>
           </div>
-          <div class="col-sm-6 mb-3">
-            <label class="form-label required" for="fStock">Tồn kho</label>
-            <input id="fStock" name="stock" type="number" class="form-control" min="0" step="1" required />
+          <div class="col-md-5">
+            <div class="form-label">Xem trước ảnh</div>
+            <div class="admin-preview-box">
+              <img id="fImagePreview" class="admin-preview" alt="Xem trước ảnh sản phẩm" hidden />
+              <span class="admin-preview-empty" id="fImageEmpty">
+                <span data-icon="photo" aria-hidden="true"></span>
+                Dán link ảnh để xem trước
+              </span>
+            </div>
           </div>
-        </div>
-        <div class="mb-3">
-          <label class="form-label" for="fImage">Link ảnh (http/https)</label>
-          <input id="fImage" name="image" type="url" class="form-control" maxlength="512" placeholder="https://…" />
-          <img id="fImagePreview" class="admin-preview mt-2" alt="Xem trước ảnh" hidden />
-        </div>
-        <div class="mb-3">
-          <label class="form-label" for="fDesc">Mô tả</label>
-          <textarea id="fDesc" name="description" class="form-control" rows="3" maxlength="5000"></textarea>
         </div>
       </div>
       <div class="modal-footer">
@@ -184,7 +304,7 @@
     </form>
   </dialog>
 
-  <script src="tools.js?v=20261016-4"></script>
-  <script src="admin.js?v=20261016-1"></script>
+  <script src="tools.js?v=20261021-2"></script>
+  <script src="admin.js?v=20261021-3"></script>
 </body>
 </html>

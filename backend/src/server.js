@@ -2,7 +2,6 @@
 require('dotenv').config({ path: require('path').resolve(__dirname, '../../.env') });
 
 const express = require('express');
-const cors = require('cors');
 
 const { pool, initDb } = require('./db');
 const { httpMetricsMiddleware, metricsHandler } = require('./metrics');
@@ -10,6 +9,7 @@ const { log, requestLogger } = require('./logger');
 const { stampMount } = require('./http-route');
 const productsRouter = require('./routes/products');
 const ordersRouter = require('./routes/orders');
+const authRouter = require('./routes/auth');
 
 const app = express();
 app.disable('x-powered-by'); // don't advertise the framework in response headers
@@ -27,14 +27,17 @@ const startedAt = Date.now();
 // Đặt trước mọi thứ: metrics đếm số, requestLogger ghi log cho CÙNG một request
 app.use(httpMetricsMiddleware);
 app.use(requestLogger);
-app.use(cors());
-app.use(express.json());
+// Không dùng cors(): web và API cùng 1 tên miền (đều đi qua nginx), nên không cần
+// cho trang web khác gọi API. Bật cors cho mọi nơi sẽ mở đường cho trang lạ gọi
+// API thay người dùng. Xem README #51.
+app.use(express.json({ limit: '100kb' }));
 
 // --- API routes ---
 // stampMount: ghi sẵn đường dẫn mount vào req để nhãn `route` của metrics/log
 // vẫn đúng khi request bị lỗi (xem giải thích trong src/http-route.js)
 app.use('/api/products', stampMount('/api/products'), productsRouter);
 app.use('/api/orders', stampMount('/api/orders'), ordersRouter);
+app.use('/api/auth', stampMount('/api/auth'), authRouter);
 
 // --- Health check (for container orchestration / monitoring) ---
 app.get('/health', (req, res) => {

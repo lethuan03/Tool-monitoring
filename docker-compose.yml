@@ -49,6 +49,12 @@ services:
       - DB_USER=${MYSQL_USER}
       - DB_PASSWORD=${MYSQL_PASSWORD}
       - DB_NAME=${MYSQL_DATABASE}
+      # Tài khoản admin trang quản trị: CHỈ dùng để tạo lần đầu khi DB chưa có admin.
+      # Tạo rồi thì đổi mật khẩu trong trang quản trị, sửa .env không có tác dụng.
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env (tối thiểu 12 ký tự)}
+      # Phiên đăng nhập hết hạn sau bao nhiêu giờ
+      - SESSION_TTL_HOURS=${SESSION_TTL_HOURS:-8}
     networks:
       - appnet
     logging: *default-logging
@@ -313,6 +319,44 @@ services:
       - appnet
     logging: *default-logging
     restart: unless-stopped
+
+  # ============ AI ĐIỀU TRA SỰ CỐ (bước 7–8) ============
+
+  # 11) HolmesGPT — đọc Prometheus + Loki + Alertmanager rồi nhờ model trên
+  # AWS Bedrock suy luận nguyên nhân. Chạy theo lệnh (CLI), KHÔNG chạy nền:
+  # profile "ai" nên `docker compose up -d` không bật nó, và không tốn tiền
+  # Bedrock khi không ai hỏi. Mỗi câu hỏi = vài lượt gọi Bedrock (tính phí).
+  #   docker compose run --rm holmes ask "Vì sao web đang lỗi 5xx?"
+  #   docker compose run --rm holmes investigate alertmanager
+  # Xem README mục 7.19.
+  holmes:
+    build: ./holmes
+    image: tool-monitoring-holmes
+    profiles: ["ai"]
+    environment:
+      # Model Bedrock: "bedrock/" + model ID hoặc inference profile ID trong .env
+      - MODEL=bedrock/${BEDROCK_MODEL_ID:-us.anthropic.claude-sonnet-4-5-20250929-v1:0}
+      - AWS_REGION_NAME=${BEDROCK_REGION:-}
+      - AWS_DEFAULT_REGION=${BEDROCK_REGION:-}
+      # Cách 1: Bedrock API key (bearer token)
+      - AWS_BEARER_TOKEN_BEDROCK=${AWS_BEARER_TOKEN_BEDROCK:-}
+      # Cách 2: access key IAM (+ session token nếu là khoá tạm từ SSO / assume role)
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN:-}
+      # Không gửi thống kê sử dụng ra ngoài
+      - LITELLM_TELEMETRY=False
+    volumes:
+      # CLI chỉ đọc ~/.holmes/config.yaml (bản 0.45.0 không dùng biến HOLMES_CONFIG_PATH).
+      # Mount riêng 1 file, thư mục ~/.holmes vẫn ghi được (CLI lưu trạng thái toolset ở đó).
+      - ./holmes/config.yaml:/home/holmes/.holmes/config.yaml:ro
+    depends_on:
+      - prometheus
+      - loki
+      - alertmanager
+    networks:
+      - appnet
+    logging: *default-logging
 
 networks:
   appnet:
