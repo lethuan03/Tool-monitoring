@@ -1,0 +1,51 @@
+{{/*
+  MẪU MAIL CẢNH BÁO — Shop Demo
+  Mỗi mail = 1 nhóm cảnh báo cùng tên luật. Có 2 loại:
+    - SỰ CỐ       (status = firing):   nền đỏ (critical) hoặc cam (warning)
+    - ĐÃ KHẮC PHỤC (status = resolved): nền xanh
+  Giờ hiển thị theo giờ Việt Nam. Sửa chữ/màu ở file này rồi
+  `docker compose restart alertmanager` là áp dụng. Xem README mục 7.14.
+*/}}
+
+{{ define "shop.email.subject" -}}
+{{ if eq .Status "firing" }}[SỰ CỐ]{{ else }}[ĐÃ KHẮC PHỤC]{{ end }}[{{ .CommonLabels.severity | toUpper }}] {{ .CommonLabels.alertname }}{{ if gt (len .Alerts.Firing) 1 }} ({{ len .Alerts.Firing }} nơi){{ end }} - Shop Demo
+{{- end }}
+
+{{ define "shop.email.time" -}}
+{{ (. | tz "Asia/Ho_Chi_Minh").Format "15:04:05 02/01/2006" }}
+{{- end }}
+
+{{ define "shop.email.html" -}}
+{{- $color := "#16a34a" -}}
+{{- if eq .Status "firing" -}}{{- if eq .CommonLabels.severity "critical" -}}{{- $color = "#dc2626" -}}{{- else -}}{{- $color = "#ea580c" -}}{{- end -}}{{- end -}}
+<!DOCTYPE html>
+<html><body style="margin:0;padding:16px;background:#f3f4f6;font-family:Arial,Helvetica,sans-serif;color:#111827;">
+<table width="100%" cellpadding="0" cellspacing="0" style="max-width:640px;margin:0 auto;background:#ffffff;border-radius:8px;overflow:hidden;">
+  <tr><td style="background:{{ $color }};color:#ffffff;padding:16px 20px;">
+    <div style="font-size:13px;opacity:.9;">SHOP DEMO · HỆ THỐNG GIÁM SÁT</div>
+    <div style="font-size:20px;font-weight:bold;margin-top:4px;">
+      {{ if eq .Status "firing" }}SỰ CỐ{{ else }}ĐÃ KHẮC PHỤC{{ end }}: {{ .CommonLabels.alertname }}
+    </div>
+    <div style="font-size:13px;margin-top:4px;">Mức độ: {{ .CommonLabels.severity | toUpper }}{{ if eq .Status "firing" }} · {{ len .Alerts.Firing }} nơi đang bị{{ end }}</div>
+  </td></tr>
+
+  {{ range .Alerts }}
+  <tr><td style="padding:16px 20px;border-bottom:1px solid #e5e7eb;">
+    <table width="100%" cellpadding="6" cellspacing="0" style="font-size:14px;border-collapse:collapse;">
+      <tr><td style="width:150px;color:#6b7280;">Sự cố</td><td><b>{{ .Annotations.summary }}</b></td></tr>
+      <tr><td style="color:#6b7280;">Trạng thái</td><td>{{ if eq .Status "firing" }}<span style="color:{{ $color }};font-weight:bold;">ĐANG XẢY RA</span>{{ else }}<span style="color:#16a34a;font-weight:bold;">ĐÃ HẾT</span>{{ end }}</td></tr>
+      <tr><td style="color:#6b7280;">Bắt đầu lúc</td><td>{{ template "shop.email.time" .StartsAt }}</td></tr>
+      {{ if eq .Status "resolved" }}<tr><td style="color:#6b7280;">Kết thúc lúc</td><td>{{ template "shop.email.time" .EndsAt }}</td></tr>{{ end }}
+      <tr><td style="color:#6b7280;">Nơi bị</td><td>{{ if .Labels.instance }}{{ .Labels.instance }}{{ else }}toàn hệ thống{{ end }}{{ if .Labels.job }} (job: {{ .Labels.job }}){{ end }}</td></tr>
+      <tr><td style="color:#6b7280;vertical-align:top;">Nên làm gì</td><td>{{ .Annotations.description }}</td></tr>
+    </table>
+  </td></tr>
+  {{ end }}
+
+  <tr><td style="padding:16px 20px;font-size:13px;color:#6b7280;">
+    Xem chi tiết: dashboard <b>Shop Overview</b> (bảng "Luật đang bị phạm") và <b>Shop Logs</b> trên Grafana.<br>
+    Mail tự động từ Alertmanager. Sự cố chưa hết sẽ được nhắc lại mỗi 1 tiếng.
+  </td></tr>
+</table>
+</body></html>
+{{- end }}

@@ -1,0 +1,34 @@
+# ============================================================================
+# Cấu hình HolmesGPT CLI (mount vào container tại /home/holmes/.holmes/config.yaml).
+#
+# KHÔNG ghi `model` ở đây: model lấy từ biến MODEL do docker-compose.yml ghép
+# từ .env (BEDROCK_MODEL_ID). Thông tin đăng nhập AWS cũng chỉ nằm trong .env.
+#
+# Mọi địa chỉ dưới đây là tên service trong mạng Docker nội bộ (appnet), nên
+# HolmesGPT đọc được số liệu/log mà không cần mở thêm cổng nào ra ngoài.
+# Chỉ phần tóm tắt HolmesGPT gửi cho model là đi ra internet (tới Bedrock).
+# ============================================================================
+
+# Số vòng tối đa "hỏi model -> gọi tool -> hỏi lại" cho 1 câu hỏi.
+# Mỗi vòng là 1 lần gọi Bedrock (tính tiền), nên để vừa phải.
+max_steps: 15
+
+# Lệnh `holmes investigate alertmanager` lấy cảnh báo đang bật ở đây
+alertmanager_url: http://alertmanager:9093
+
+toolsets:
+  # Số liệu: chạy PromQL trên Prometheus (CPU, RAM, 5xx, mysql_up, ALERTS...)
+  prometheus/metrics:
+    enabled: true
+    subtype: prometheus
+    config:
+      prometheus_url: http://prometheus:9090
+
+  # Log: chạy LogQL thẳng vào Loki (nhãn service, level, status — xem alloy/config.alloy)
+  grafana/loki:
+    enabled: true
+    config:
+      api_url: http://loki:3100
+
+  # Không bật toolset docker/kubernetes: muốn dùng phải mount docker.sock
+  # (= quyền root trên máy), không đáng cho việc điều tra chỉ cần đọc số + log.

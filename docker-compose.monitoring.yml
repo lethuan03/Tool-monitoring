@@ -1,0 +1,211 @@
+# ============================================================================
+# CHẾ ĐỘ "1 EC2, 2 DOCKER COMPOSE": file này chứa phần MONITORING (prometheus,
+# grafana, loki, alertmanager, holmes). Phần APP chạy ở docker-compose.app.yml
+# — CÙNG 1 EC2, nối nhau qua network dùng chung "ecommerce-shared" (xem README).
+#
+# Mọi image đều PULL từ Docker Hub (thuanperry/ecommerce-*), không build,
+# không bind-mount config nào từ host — toàn bộ config (prometheus.yml,
+# dashboard Grafana, loki-config.yml, alertmanager.yml, holmes config.yaml)
+# đã đóng gói sẵn vào image (xem Dockerfile trong từng thư mục).
+#
+#   docker network create ecommerce-shared   # chỉ cần tạo 1 lần
+#   docker compose -f docker-compose.monitoring.yml --env-file .env.monitoring up -d
+#
+# prometheus/prometheus.yml (đóng gói trong thuanperry/ecommerce-prometheus)
+# ghi thẳng tên container của app (ecommerce-backend, ecommerce-nginx-exporter,
+# ecommerce-mysqld-exporter, ecommerce-node-exporter) — gọi được vì service
+# "prometheus" join thêm network "shared". Tương tự Alloy (bên app) đẩy log
+# vào "ecommerce-loki" vì "loki" ở đây cũng join "shared".
+#
+# name: đặt tên project Compose cố định "tool-monitoring-ver-2" để
+# container/volume/network không đụng tên nếu test chung máy với 1 compose khác.
+# ============================================================================
+
+name: tool-monitoring-ver-2
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  # Prometheus — pull metrics từ app (cùng EC2) qua network "shared"
+  prometheus:
+    image: thuanperry/ecommerce-prometheus:latest
+    container_name: ecommerce-prometheus
+    environment:
+      - PROMETHEUS_RETENTION_TIME=${PROMETHEUS_RETENTION_TIME:-15d}
+      - PROMETHEUS_RETENTION_SIZE=${PROMETHEUS_RETENTION_SIZE:-5GB}
+    volumes:
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      - alertmanager
+    networks:
+      - monitoringnet
+      - shared
+    logging: *default-logging
+    restart: unless-stopped
+
+  # Alertmanager — gửi cảnh báo TELEGRAM và/hoặc MAIL
+  alertmanager:
+    image: thuanperry/ecommerce-alertmanager:latest
+    container_name: ecommerce-alertmanager
+    environment:
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_FROM=${SMTP_FROM:-}
+      - SMTP_USERNAME=${SMTP_USERNAME:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - SMTP_REQUIRE_TLS=${SMTP_REQUIRE_TLS:-true}
+      - ALERT_EMAIL_TO=${ALERT_EMAIL_TO:-}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+      - TELEGRAM_API_URL=${TELEGRAM_API_URL:-https://api.telegram.org}
+      - ALERTMANAGER_URL=${ALERTMANAGER_URL:-http://localhost/admin/alertmanager/}
+      # Có giá trị (http://holmes-bridge:8080/alert) = bật AI phân tích (service holmes-bridge)
+      - AI_WEBHOOK_URL=${AI_WEBHOOK_URL:-}
+    volumes:
+      - alertmanager-data:/alertmanager
+    ports:
+      - "127.0.0.1:9093:9093"
+    networks:
+      - monitoringnet
+      - shared
+    logging: *default-logging
+    restart: unless-stopped
+
+  # (Chỉ để TEST) mailpit. Bật bằng: docker compose -f docker-compose.monitoring.yml --profile mail-test up -d
+  mailpit:
+    image: axllent/mailpit:v1.31.5
+    container_name: ecommerce-mailpit
+    profiles: ["mail-test"]
+    ports:
+      - "127.0.0.1:8025:8025"
+    networks:
+      - monitoringnet
+    logging: *default-logging
+    restart: unless-stopped
+
+  # Loki — nhận log Alloy (bên app) đẩy qua network "shared"
+  loki:
+    image: thuanperry/ecommerce-loki:latest
+    container_name: ecommerce-loki
+    environment:
+      - LOKI_RETENTION_PERIOD=${LOKI_RETENTION_PERIOD:-168h}
+    volumes:
+      - loki-data:/loki
+    ports:
+      # Loopback only — chỉ để gỡ lỗi trực tiếp trên EC2 (SSM port-forward).
+      # Alloy đẩy log qua network "shared" nội bộ Docker, không qua port này.
+      - "127.0.0.1:${LOKI_PORT:-3100}:3100"
+    networks:
+      - monitoringnet
+      - shared
+    logging: *default-logging
+    restart: unless-stopped
+
+  # Grafana — vẽ dashboard từ Prometheus + Loki (cùng compose này)
+  grafana:
+    image: thuanperry/ecommerce-grafana:latest
+    container_name: ecommerce-grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env.monitoring}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      - GF_ANALYTICS_REPORTING_ENABLED=false
+      - GF_ANALYTICS_CHECK_FOR_UPDATES=false
+      - GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES=false
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/etc/grafana/dashboards/shop-overview.json
+      - GF_SERVER_SERVE_FROM_SUB_PATH=true
+      - GF_SERVER_ROOT_URL=${GRAFANA_ROOT_URL:-http://localhost/admin/grafana/}
+    volumes:
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3001}:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      - prometheus
+      - loki
+    networks:
+      - monitoringnet
+      - shared
+    logging: *default-logging
+    restart: unless-stopped
+
+  # HolmesGPT — AI điều tra sự cố (chạy theo lệnh, profile "ai")
+  holmes:
+    image: thuanperry/ecommerce-holmes:latest
+    profiles: ["ai"]
+    environment:
+      - MODEL=bedrock/${BEDROCK_MODEL_ID:-us.anthropic.claude-sonnet-4-5-20250929-v1:0}
+      - AWS_REGION_NAME=${BEDROCK_REGION:-}
+      - AWS_DEFAULT_REGION=${BEDROCK_REGION:-}
+      - AWS_BEARER_TOKEN_BEDROCK=${AWS_BEARER_TOKEN_BEDROCK:-}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN:-}
+      - LITELLM_TELEMETRY=False
+    depends_on:
+      - prometheus
+      - loki
+      - alertmanager
+    networks:
+      - monitoringnet
+    logging: *default-logging
+
+  # holmes-bridge — cảnh báo FIRING -> AI phân tích xong mới nhắn Telegram;
+  # cảnh báo hết -> nhắn "đã hoạt động bình thường". Chạy nền, profile "ai".
+  # Bật: đặt AI_WEBHOOK_URL=http://holmes-bridge:8080/alert trong .env.monitoring
+  holmes-bridge:
+    image: thuanperry/ecommerce-holmes-bridge:latest
+    container_name: ecommerce-holmes-bridge
+    profiles: ["ai"]
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+      - TELEGRAM_API_URL=${TELEGRAM_API_URL:-https://api.telegram.org}
+      - PROMETHEUS_URL=http://prometheus:9090
+      - AI_SEVERITIES=${AI_SEVERITIES:-critical,warning}
+      - AI_MAX_PER_HOUR=${AI_MAX_PER_HOUR:-6}
+      - AI_MAX_STEPS=${AI_MAX_STEPS:-15}
+      - MODEL=bedrock/${BEDROCK_MODEL_ID:-us.anthropic.claude-sonnet-4-5-20250929-v1:0}
+      - AWS_REGION_NAME=${BEDROCK_REGION:-}
+      - AWS_DEFAULT_REGION=${BEDROCK_REGION:-}
+      - AWS_BEARER_TOKEN_BEDROCK=${AWS_BEARER_TOKEN_BEDROCK:-}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN:-}
+      - LITELLM_TELEMETRY=False
+    depends_on:
+      - prometheus
+      - loki
+      - alertmanager
+    networks:
+      - monitoringnet
+    logging: *default-logging
+    restart: unless-stopped
+
+networks:
+  monitoringnet:
+    driver: bridge
+  shared:
+    external: true
+    name: ecommerce-shared
+
+volumes:
+  prometheus-data:
+  alertmanager-data:
+  loki-data:
+  grafana-data:

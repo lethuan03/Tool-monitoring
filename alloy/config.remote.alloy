@@ -1,0 +1,202 @@
+// ============================================================================
+// Grafana Alloy — bản dùng cho CHẾ ĐỘ TÁCH (docker-compose.app.yml), chạy
+// trên EC2. Khác bản gốc (alloy/config.alloy, dùng cho all-in-one 1 máy):
+// endpoint đẩy log sang Loki đọc từ biến môi trường LOKI_PUSH_URL (đặt trong
+// .env.app, dùng hostname Tailscale của máy local chạy monitoring), vì Loki
+// không còn ở cùng docker network nội bộ nữa.
+//
+// Toàn bộ phần phân tích log (parse theo service) giữ NGUYÊN như bản gốc —
+// chỉ khác bước 5) cuối file (đẩy sang Loki).
+// ============================================================================
+
+logging {
+  level  = "warn"
+  format = "logfmt"
+}
+
+discovery.docker "compose" {
+  host             = "unix:///var/run/docker.sock"
+  refresh_interval = "5s"
+}
+
+discovery.relabel "compose" {
+  targets = discovery.docker.compose.targets
+
+  // Chỉ gom log của đúng các service app chạy trên EC2 (không có monitoring ở đây)
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    regex         = "db|backend|frontend|nginx|nginx-exporter|mysqld-exporter|node-exporter|alloy"
+    action        = "keep"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/?(.*)"
+    target_label  = "container"
+  }
+}
+
+loki.source.docker "compose" {
+  host             = "unix:///var/run/docker.sock"
+  targets          = discovery.relabel.compose.output
+  labels           = { job = "docker" }
+  forward_to       = [loki.process.parse.receiver]
+  refresh_interval = "5s"
+}
+
+loki.process "parse" {
+
+  // ======================= nginx (cửa vào web) =======================
+  stage.match {
+    selector = "{service=\"nginx\"}"
+
+    stage.json {
+      expressions = {
+        status        = "status",
+        method        = "method",
+        path          = "path",
+        request_time  = "request_time",
+        upstream_time = "upstream_time",
+      }
+    }
+
+    stage.regex {
+      expression = "\\[(?P<nginx_level>emerg|alert|crit|error|warn|notice)\\]"
+    }
+
+    stage.template {
+      source   = "level"
+      template = "{{ if .status }}{{ if ge (atoi .status) 500 }}error{{ else if ge (atoi .status) 400 }}warn{{ else }}info{{ end }}{{ else if eq .nginx_level \"notice\" }}info{{ else if eq .nginx_level \"warn\" }}warn{{ else if .nginx_level }}error{{ else }}info{{ end }}"
+    }
+
+    stage.labels {
+      values = {
+        method = "method",
+        status = "status",
+      }
+    }
+
+    stage.structured_metadata {
+      values = {
+        request_time  = "request_time",
+        upstream_time = "upstream_time",
+      }
+    }
+  }
+
+  // ======================= frontend (nginx tĩnh) =======================
+  stage.match {
+    selector = "{service=\"frontend\"}"
+
+    stage.regex {
+      expression = "\"(?P<method>[A-Z]+) (?P<path>[^ ]+) HTTP/[0-9.]+\" (?P<status>\\d{3})"
+    }
+
+    stage.template {
+      source   = "level"
+      template = "{{ if .status }}{{ if ge (atoi .status) 500 }}error{{ else if ge (atoi .status) 400 }}warn{{ else }}info{{ end }}{{ else }}info{{ end }}"
+    }
+
+    stage.labels {
+      values = {
+        method = "method",
+        status = "status",
+      }
+    }
+  }
+
+  // ======================= backend (web app) =======================
+  stage.match {
+    selector = "{service=\"backend\"}"
+
+    stage.json {
+      expressions = {
+        level       = "level",
+        msg         = "msg",
+        route       = "route",
+        status      = "status",
+        duration_ms = "duration_ms",
+      }
+    }
+
+    stage.timestamp {
+      source   = "time"
+      format   = "RFC3339Nano"
+      fallback_formats = ["RFC3339"]
+      action_on_failure = "fudge"
+    }
+
+    stage.labels {
+      values = {
+        status = "status",
+      }
+    }
+
+    stage.structured_metadata {
+      values = {
+        route       = "route",
+        duration_ms = "duration_ms",
+      }
+    }
+  }
+
+  // ======================= MySQL =======================
+  stage.match {
+    selector = "{service=\"db\"}"
+
+    stage.regex {
+      expression = "\\[(?P<mysql_level>System|Warning|Note|ERROR|Error)\\]"
+    }
+
+    stage.template {
+      source   = "level"
+      template = "{{ if eq .mysql_level \"ERROR\" }}error{{ else if eq .mysql_level \"Error\" }}error{{ else if eq .mysql_level \"Warning\" }}warn{{ else }}info{{ end }}"
+    }
+  }
+
+  // ======================= exporter còn lại (logfmt) =======================
+  stage.match {
+    selector = "{service=~\"nginx-exporter|mysqld-exporter|node-exporter|alloy\"}"
+
+    stage.logfmt {
+      mapping = {
+        level = "",
+        msg   = "",
+      }
+    }
+  }
+
+  // ======================= chuẩn hoá chung =======================
+  stage.template {
+    source   = "level"
+    template = "{{ if .Value }}{{ ToLower .Value }}{{ else }}info{{ end }}"
+  }
+
+  stage.template {
+    source   = "level"
+    template = "{{ if eq .Value \"warning\" }}warn{{ else if eq .Value \"err\" }}error{{ else if eq .Value \"eror\" }}error{{ else if eq .Value \"critical\" }}error{{ else if eq .Value \"fatal\" }}error{{ else }}{{ .Value }}{{ end }}"
+  }
+
+  stage.labels {
+    values = {
+      level = "level",
+    }
+  }
+
+  forward_to = [loki.write.default.receiver]
+}
+
+// ---------------------------------------------------------------------------
+// 5) ĐẨY sang Loki — ở máy LOCAL, qua Tailscale. LOKI_PUSH_URL đặt trong
+// .env.app, dạng http://<hostname-tailscale-cua-may-local>:3100/loki/api/v1/push
+// ---------------------------------------------------------------------------
+loki.write "default" {
+  endpoint {
+    url = sys.env("LOKI_PUSH_URL")
+  }
+}

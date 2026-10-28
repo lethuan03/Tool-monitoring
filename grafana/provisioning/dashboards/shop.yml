@@ -1,0 +1,15 @@
+# Grafana tự nạp mọi dashboard JSON trong /etc/grafana/dashboards (thư mục grafana/dashboards trong repo).
+apiVersion: 1
+
+providers:
+  - name: shop
+    folder: Shop
+    type: file
+    disableDeletion: true
+    # Dashboard quản lý bằng file trong git: sửa trên giao diện không lưu đè được,
+    # muốn thay đổi lâu dài thì sửa file JSON (xem README).
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/dashboards
+      foldersFromFilesStructure: false

@@ -1,0 +1,10 @@
+node_modules/
+
+# Secrets: file .env thật không bao giờ lên git (chỉ file mẫu *.example)
+.env
+.env.*
+!.env.app.example
+!.env.monitoring.example
+
+# Script / user data trên EC2 chứa sẵn mật khẩu thật — không commit
+ec2/

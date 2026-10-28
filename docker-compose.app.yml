@@ -1,0 +1,171 @@
+# ============================================================================
+# CHẾ ĐỘ "1 EC2, 2 DOCKER COMPOSE": file này chứa phần APP (backend, frontend,
+# nginx, 3 exporter, alloy). Phần MONITORING (prometheus, grafana, loki,
+# alertmanager, holmes) chạy ở docker-compose.monitoring.yml — CŨNG 1 EC2,
+# nối nhau qua 1 network Docker dùng chung "ecommerce-shared" (xem README).
+#
+# Mọi image đều PULL từ Docker Hub (thuanperry/ecommerce-*), không build.
+# Chạy (sau khi đã tạo network dùng chung — xem README):
+#   docker network create ecommerce-shared   # chỉ cần tạo 1 lần
+#   docker compose -f docker-compose.app.yml --env-file .env.app up -d
+#   docker compose -f docker-compose.monitoring.yml --env-file .env.monitoring up -d
+#
+# Vì sao cần network "ecommerce-shared": mỗi file docker-compose tự tạo 1
+# network riêng (appnet ở đây, monitoringnet ở file kia) — 2 network đó CÔ
+# LẬP với nhau theo mặc định, dù chạy trên cùng 1 máy. "shared" là network
+# phụ, join thêm vào những service cần gọi CHÉO qua file bên kia:
+#   - backend, nginx-exporter, mysqld-exporter, node-exporter: để Prometheus
+#     (ở file monitoring) pull được /metrics bằng tên container.
+#   - alloy: để đẩy log sang Loki (ở file monitoring) bằng tên container.
+# db/frontend/nginx không cần gọi chéo nên chỉ ở network "appnet" nội bộ.
+# ============================================================================
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+services:
+  # 1) Database
+  db:
+    image: thuanperry/ecommerce-db:latest
+    container_name: ecommerce-db
+    environment:
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env.app}
+      - MYSQL_DATABASE=${MYSQL_DATABASE:?set MYSQL_DATABASE in .env.app}
+      - MYSQL_USER=${MYSQL_USER:?set MYSQL_USER in .env.app}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env.app}
+      - MYSQL_EXPORTER_PASSWORD=${MYSQL_EXPORTER_PASSWORD:?set MYSQL_EXPORTER_PASSWORD in .env.app}
+    volumes:
+      - ecommerce-db-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_ROOT_PASSWORD\" mysqladmin ping -h localhost -uroot --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - appnet
+    logging: *default-logging
+    restart: unless-stopped
+  # 2) Backend API — cần network "shared" để Prometheus (file monitoring) pull /metrics
+  backend:
+    image: thuanperry/ecommerce-backend:latest
+    container_name: ecommerce-backend
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - DB_HOST=db
+      - DB_PORT=3306
+      - DB_USER=${MYSQL_USER}
+      - DB_PASSWORD=${MYSQL_PASSWORD}
+      - DB_NAME=${MYSQL_DATABASE}
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env.app (tối thiểu 12 ký tự)}
+      - SESSION_TTL_HOURS=${SESSION_TTL_HOURS:-8}
+    networks:
+      - appnet
+      - shared
+    logging: *default-logging
+    restart: unless-stopped
+  # 3) Frontend (static files served by nginx)
+  frontend:
+    image: thuanperry/ecommerce-frontend:latest
+    container_name: ecommerce-frontend
+    networks:
+      - appnet
+    logging: *default-logging
+    restart: unless-stopped
+  # 4) Edge reverse proxy (cổng public duy nhất)
+  nginx:
+    image: thuanperry/ecommerce-nginx:latest
+    container_name: ecommerce-nginx
+    environment:
+      - MONITORING_BASIC_AUTH_USER=${MONITORING_BASIC_AUTH_USER:?set MONITORING_BASIC_AUTH_USER in .env.app}
+      - MONITORING_BASIC_AUTH_PASSWORD=${MONITORING_BASIC_AUTH_PASSWORD:?set MONITORING_BASIC_AUTH_PASSWORD in .env.app}
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+    networks:
+      - appnet
+      - shared
+    logging: *default-logging
+    restart: unless-stopped
+  # 5) nginx-exporter — cần "shared" để Prometheus pull bằng tên container
+  nginx-exporter:
+    image: nginx/nginx-prometheus-exporter:1.3.0
+    container_name: ecommerce-nginx-exporter
+    command:
+      - --nginx.scrape-uri=http://nginx:8081/stub_status
+    depends_on:
+      - nginx
+    networks:
+      - appnet
+      - shared
+    logging: *default-logging
+    restart: unless-stopped
+  # 6) mysqld-exporter — cần "shared" để Prometheus pull bằng tên container
+  mysqld-exporter:
+    image: prom/mysqld-exporter:v0.15.1
+    container_name: ecommerce-mysqld-exporter
+    command:
+      - --mysqld.address=db:3306
+      - --mysqld.username=exporter
+    environment:
+      - MYSQLD_EXPORTER_PASSWORD=${MYSQL_EXPORTER_PASSWORD}
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - appnet
+      - shared
+    logging: *default-logging
+    restart: unless-stopped
+  # 6b) node-exporter — số đo thật của EC2. Cần "shared" để Prometheus pull bằng tên container
+  node-exporter:
+    image: prom/node-exporter:v1.12.1
+    container_name: ecommerce-node-exporter
+    command:
+      - --path.rootfs=/host
+    pid: host
+    volumes:
+      - /:/host:ro
+    networks:
+      - appnet
+      - shared
+    logging: *default-logging
+    restart: unless-stopped
+  # 7) Alloy — đọc log mọi container qua docker socket, đẩy sang Loki (file
+  # monitoring) bằng tên container trên network "shared".
+  alloy:
+    image: thuanperry/ecommerce-alloy:latest
+    container_name: ecommerce-alloy
+    user: root
+    environment:
+      # Tên container Loki ở docker-compose.monitoring.yml, gọi được vì cùng
+      # join network "shared".
+      - LOKI_PUSH_URL=${LOKI_PUSH_URL:-http://ecommerce-loki:3100/loki/api/v1/push}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy-data:/var/lib/alloy/data
+    networks:
+      - appnet
+      - shared
+    logging: *default-logging
+    restart: unless-stopped
+networks:
+  appnet:
+    driver: bridge
+  shared:
+    external: true
+    name: ecommerce-shared
+volumes:
+  ecommerce-db-data:
+  alloy-data:
