@@ -1,6 +1,6 @@
 # Tra cứu nhanh — Tool, port, đường dẫn
 
-> `<web>` = địa chỉ ALB hoặc IP public của EC2. Hệ thống chạy trên 1 EC2 bằng 2 file: `docker-compose.app.yml` (web) và `docker-compose.monitoring.yml` (giám sát). Chi tiết: README mục 1 và 12.
+> `<web>` = địa chỉ ALB hoặc IP public của EC2. Hệ thống chạy bằng 2 file: `webapp/docker-compose.app.yml` (web) và `monitoring/docker-compose.monitoring.yml` (giám sát), mỗi file nằm cạnh `.env` của nó (`webapp/.env.app`, `monitoring/.env.monitoring`). Chi tiết: README mục 1 và 12.
 
 ## 1. Mở trên trình duyệt
 
@@ -33,6 +33,8 @@
 | ecommerce-grafana | monitoring | `thuanperry/ecommerce-grafana` | `3000` | Chỉ `127.0.0.1:3001` | nginx (`/admin/grafana/`) |
 | ecommerce-holmes-bridge (profile `ai`) | monitoring | `thuanperry/ecommerce-holmes-bridge` | `8080` | Không | Alertmanager (webhook) |
 | holmes (profile `ai`, chạy theo lệnh) | monitoring | `thuanperry/ecommerce-holmes` | không có | Không | Bạn gọi bằng `run --rm` |
+| ecommerce-remediator (profile `ai`) | monitoring | `thuanperry/ecommerce-remediator` | `8090` | Không | holmes-bridge gửi đề xuất; người duyệt qua Telegram. Mặc định **dry-run**. Xem README2.md |
+| ecommerce-docker-proxy (profile `ai`) | monitoring | `tecnativa/docker-socket-proxy:0.3.0` | `2375` | Không (mạng `dockernet` nội bộ) | Chỉ remediator |
 | ecommerce-mailpit (profile `mail-test`) | monitoring | `axllent/mailpit:v1.31.5` | `1025`, `8025` | Chỉ `127.0.0.1:8025` | Alertmanager gửi mail test |
 
 Security Group chỉ cần mở **80**. Hai file compose nói chuyện với nhau qua network Docker `ecommerce-shared`.
@@ -56,19 +58,26 @@ Mỗi lần vào EC2, khai báo trước:
 
 ```bash
 sudo -i; cd /opt/ecommerce
-APP="docker compose -f docker-compose.app.yml --env-file .env.app"
-MON="docker compose -f docker-compose.monitoring.yml --env-file .env.monitoring"
+APP="docker compose -f webapp/docker-compose.app.yml --env-file webapp/.env.app"
+MON="docker compose -f monitoring/docker-compose.monitoring.yml --env-file monitoring/.env.monitoring"
 ```
 
 | Việc | Lệnh |
 | ---- | ---- |
 | Bật cả hệ thống | `$APP up -d && $MON up -d` |
-| Bật AI (holmes-bridge) | `$MON --profile ai up -d holmes-bridge` |
+| Bật toàn bộ AI (bridge + remediator + docker-proxy) | `$MON --profile ai up -d` |
 | Cập nhật image mới | `$APP pull && $APP up -d` · `$MON pull && $MON up -d` |
 | Xem trạng thái | `docker ps` |
 | Xem log | `docker logs -f ecommerce-backend` (đổi tên container) |
 | Giả lập DB chết / khôi phục | `docker stop ecommerce-db` / `docker start ecommerce-db` |
 | Sửa `.env.*` xong | `$APP up -d --force-recreate <service>` hoặc `$MON ...` (`restart` **không** đọc lại `.env`) |
+| Điều kiện để AI chạy | `.env.monitoring` có `BEDROCK_REGION`, `BEDROCK_MODEL_ID` (không có dấu cách), khoá Bedrock, `AI_WEBHOOK_URL=http://holmes-bridge:8080/alert`, `REMEDIATOR_URL=http://remediator:8090` |
+| Chạy thật lệnh đã duyệt | `REMEDIATION_MODE=execute` trong `.env.monitoring`, rồi `$MON --profile ai up -d --force-recreate remediator` (mặc định `dry-run`) |
+| Giảm chi phí Bedrock | `AI_MAX_ROUNDS` (số vòng/sự cố, mặc định 3), `AI_MAX_PER_HOUR` (mặc định 6) |
+| Gõ lệnh trong chat Telegram | `/restart backend` · `/start db` · `/logs nginx` · `/help` · `/stop` · hoặc `docker restart backend`. Mọi lệnh cần bấm ✅ Duyệt. Lệnh ngoài kho lệnh (`docker rm`, `/restart db`...) → "⛔ KHÔNG ĐƯỢC PHÉP" |
+| Dừng vòng xử lý của AI | Nút ⏹ trên tin Telegram hoặc gõ `/stop` |
+| Xem audit lệnh sửa lỗi | `docker exec ecommerce-remediator tail -n 20 //audit/audit.jsonl` (Git Bash trên Windows cần `//`) hoặc Grafana → Shop Logs → hàng **Remediation** |
+| Tắt khẩn cấp lệnh sửa lỗi | `$MON stop remediator` (hoặc `REMEDIATION_ENABLED=false` rồi `--force-recreate remediator`) |
 | Hỏi AI (**tốn phí Bedrock**) | `$MON --profile ai run --rm holmes ask "Vì sao web lỗi 5xx?" --no-interactive` |
 | Tắt (giữ dữ liệu) | `$MON down && $APP down` (thêm `-v` để xoá cả dữ liệu) |
 | Build + push image (máy local) | `.\scripts\push-images.ps1` |

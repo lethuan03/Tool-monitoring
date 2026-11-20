@@ -6,6 +6,8 @@ Web bán hàng demo, tách **3 tầng**: Frontend (tĩnh) · Backend (REST API) 
 Toàn bộ chạy trên **1 EC2** bằng **2 file docker compose**, image kéo từ Docker Hub (`thuanperry/ecommerce-*`).
 
 > **Không nhớ port/link?** Xem bảng tra cứu: **[TRA-CUU-NHANH.md](TRA-CUU-NHANH.md)**.
+>
+> **AI có runbook + đề xuất lệnh sửa lỗi (người duyệt trên Telegram, có audit)?** Xem phần mở rộng: **[README2.md](ai-remediation/README2.md)**.
 
 Mục lục:
 
@@ -30,24 +32,49 @@ Hệ thống gồm **2 file docker compose**, chạy trên cùng 1 EC2, nối nh
 
 | File | Chứa gì | File biến (mẫu trên git) |
 | ---- | ------- | ------------------------ |
-| `docker-compose.app.yml` | **Web**: db, backend, frontend, nginx, nginx-exporter, mysqld-exporter, node-exporter, alloy | `.env.app` (`.env.app.example`) |
-| `docker-compose.monitoring.yml` | **Giám sát**: prometheus, alertmanager, loki, grafana. Profile `ai`: holmes, holmes-bridge. Profile `mail-test`: mailpit | `.env.monitoring` (`.env.monitoring.example`) |
+| `webapp/docker-compose.app.yml` | **Web**: db, backend, frontend, nginx, nginx-exporter, mysqld-exporter, node-exporter, alloy | `webapp/.env.app` (mẫu `webapp/.env.app.example`) |
+| `monitoring/docker-compose.monitoring.yml` | **Giám sát**: prometheus, alertmanager, loki, grafana. Profile `ai`: holmes, holmes-bridge, remediator, docker-proxy. Profile `mail-test`: mailpit | `monitoring/.env.monitoring` (mẫu `monitoring/.env.monitoring.example`; chứa cả khoá Bedrock + Telegram) |
+
+Repo chia 3 thư mục: `webapp/` (code + compose của shop), `monitoring/` (cấu hình + compose giám sát), `ai-remediation/` (AI đề xuất/chạy lệnh sửa lỗi: bridge, remediator, sandbox, [README2.md](ai-remediation/README2.md)). Mỗi compose nằm cạnh file `.env` của nó.
 
 Mọi config đã đóng gói sẵn trong image, EC2 chỉ cần 2 file compose + 2 file `.env`. Lần đầu dựng EC2 xem **mục 12.3**. Mỗi lần SSH/SSM vào EC2:
 
 ```bash
 sudo -i
 cd /opt/ecommerce
-APP="docker compose -f docker-compose.app.yml --env-file .env.app"
-MON="docker compose -f docker-compose.monitoring.yml --env-file .env.monitoring"
+APP="docker compose -f webapp/docker-compose.app.yml --env-file webapp/.env.app"
+MON="docker compose -f monitoring/docker-compose.monitoring.yml --env-file monitoring/.env.monitoring"
 ```
 
 Hai biến `$APP` và `$MON` được dùng trong cả README này.
 
+**Chạy trên máy local (Docker Desktop)** — làm giống EC2, chỉ khác 3 điểm: chạy ở thư mục gốc repo, tự build image thay vì pull, dùng mật khẩu local.
+
+```bash
+docker network create ecommerce-shared                 # 1 lần
+cp webapp/.env.app.example webapp/.env.app             # điền mật khẩu (chữ + số); HTTP_PORT=80 (hoặc 8080 nếu cổng 80 bận)
+cp monitoring/.env.monitoring.example monitoring/.env.monitoring   # điền Grafana/Telegram/Bedrock
+
+# Build image local, gắn đúng tag mà compose dùng (KHÔNG push)
+for x in "backend webapp/backend" "frontend webapp/frontend" "nginx webapp/nginx" "db webapp/mysql" \
+         "alloy monitoring/alloy" "prometheus monitoring/prometheus" "grafana monitoring/grafana" \
+         "loki monitoring/loki" "alertmanager monitoring/alertmanager" "holmes monitoring/holmes" \
+         "holmes-bridge ai-remediation/holmes-bridge" "remediator ai-remediation/remediator"; do
+  set -- $x; docker build -t thuanperry/ecommerce-$1:latest $2
+done    # holmes phải build trước holmes-bridge (bridge dựng trên image holmes)
+
+APP="docker compose -f webapp/docker-compose.app.yml --env-file webapp/.env.app"
+MON="docker compose -f monitoring/docker-compose.monitoring.yml --env-file monitoring/.env.monitoring"
+$APP up -d && $MON --profile ai up -d
+```
+
+Mở `http://localhost/` (shop), `http://localhost/admin/grafana/` (Grafana, đi qua nginx nên cần cổng 80) hoặc `http://localhost:3001` (Grafana trực tiếp). Tên project compose: app = `tool-monitoring-app`, monitoring = `tool-monitoring-ver-2` (cố định, không phụ thuộc tên thư mục). `docker compose ... config` in ra giá trị biến thật, chỉ dùng `config --no-interpolate -q` để kiểm tra cú pháp.
+
 | Việc | Lệnh |
 | ---- | ---- |
 | Bật cả hệ thống | `$APP up -d && $MON up -d` |
-| Bật thêm AI (cần khoá Bedrock, mục 7.19–7.20) | `$MON --profile ai up -d holmes-bridge` |
+| Bật toàn bộ AI (cần khoá Bedrock, mục 7.19–7.20) | `$MON --profile ai up -d` (gồm holmes-bridge, remediator, docker-proxy). Trong `.env.monitoring` cần: `BEDROCK_REGION`, `BEDROCK_MODEL_ID`, khoá Bedrock, `AI_WEBHOOK_URL=http://holmes-bridge:8080/alert`, `REMEDIATOR_URL=http://remediator:8090` |
+| Chạy thật lệnh đã duyệt (mặc định `dry-run` chỉ ghi nhận) | Đặt `REMEDIATION_MODE=execute` rồi `$MON --profile ai up -d --force-recreate remediator` |
 | Cập nhật image mới từ Docker Hub | `$APP pull && $APP up -d` · `$MON pull && $MON up -d` |
 | Xem trạng thái | `docker ps` |
 | Xem log 1 container | `docker logs -f ecommerce-backend` (đổi tên container) |
@@ -229,7 +256,7 @@ Khôi phục bằng `docker start ecommerce-db`.
 
 ### 4.4. Từng tool — làm gì & chỉ số quan trọng
 
-#### a) Backend (web app) — tự xuất số, file `backend/src/metrics.js`
+#### a) Backend (web app) — tự xuất số, file `webapp/backend/src/metrics.js`
 
 **Làm gì:** mỗi request vào backend được đếm lại và bấm giờ. Ngoài ra thư viện tự đo sức khoẻ của chương trình Node.js (CPU, RAM…).
 
@@ -277,7 +304,7 @@ Ví dụ % kết nối đã dùng:
 
 #### d) Prometheus
 
-**Làm gì:** đọc file `prometheus/prometheus.yml` để biết đi lấy số ở đâu (4 "job": `prometheus`, `backend`, `nginx`, `mysql`), kéo số mỗi 15 giây, lưu tối đa 15 ngày hoặc 5GB (cái nào tới trước). Dữ liệu nằm trong volume `prometheus-data` nên restart không mất.
+**Làm gì:** đọc file `monitoring/prometheus/prometheus.yml` để biết đi lấy số ở đâu (4 "job": `prometheus`, `backend`, `nginx`, `mysql`), kéo số mỗi 15 giây, lưu tối đa 15 ngày hoặc 5GB (cái nào tới trước). Dữ liệu nằm trong volume `prometheus-data` nên restart không mất.
 
 | Chỉ số | Ý nghĩa |
 | ------ | ------- |
@@ -297,8 +324,8 @@ Prometheus (sổ ghi số)  ◄── hỏi PromQL mỗi 15s ──  Grafana  �
 
 **Đã cài sẵn hết, không cần bấm tay:**
 
-- Grafana tự kết nối tới Prometheus khi khởi động (`grafana/provisioning/datasources/prometheus.yml`).
-- Dashboard **Shop Overview** tự được nạp, và là **trang chủ** khi đăng nhập (`grafana/dashboards/shop-overview.json`).
+- Grafana tự kết nối tới Prometheus khi khởi động (`monitoring/grafana/provisioning/datasources/prometheus.yml`).
+- Dashboard **Shop Overview** tự được nạp, và là **trang chủ** khi đăng nhập (`monitoring/grafana/dashboards/shop-overview.json`).
 - Toàn bộ query đã viết **một lần** trong file JSON này. Ai `git pull` về cũng có dashboard y hệt.
 
 **Dashboard "Shop Overview" có 4 hàng.** Rê chuột vào biểu tượng ⓘ cạnh tên mỗi ô để xem giải thích.
@@ -325,7 +352,7 @@ Prometheus (sổ ghi số)  ◄── hỏi PromQL mỗi 15s ──  Grafana  �
 
 1. Sửa trên giao diện Grafana.
 2. Bấm **Save** sẽ báo không lưu được. Đây là cố ý: dashboard được quản lý bằng file trong git để không ai sửa ngầm.
-3. Bấm **Export → Export as JSON**, chép nội dung đè vào `grafana/dashboards/shop-overview.json`.
+3. Bấm **Export → Export as JSON**, chép nội dung đè vào `monitoring/grafana/dashboards/shop-overview.json`.
 4. Commit file đó, chạy `.\scripts\push-images.ps1` để build lại image `ecommerce-grafana`, rồi trên EC2 `$MON pull grafana && $MON up -d grafana`.
 
 **"Realtime" chậm bao nhiêu?** Prometheus lấy số mỗi 15 giây, Grafana làm mới mỗi 15 giây. Vì vậy biểu đồ chậm hơn thực tế tối đa khoảng **15–30 giây**. Đây là mức chuẩn của production. Các biểu đồ "mỗi giây" tính trung bình trên khoảng **1 phút** gần nhất, nên một sự kiện cần khoảng 1 phút để hiện rõ.
@@ -370,12 +397,12 @@ Hệ thống hiện tại có **18 stream** — đã kiểm tra, không có card
 
 #### d) Mỗi service log kiểu khác nhau nên parse khác nhau
 
-Toàn bộ nằm trong `alloy/config.remote.alloy`:
+Toàn bộ nằm trong `monitoring/alloy/config.remote.alloy`:
 
 | Service | Định dạng log | Alloy làm gì |
 | ------- | ------------- | ------------ |
-| `nginx` | **JSON** (đã đổi trong `nginx/default.conf`) | `stage.json` bóc status/method/path/request_time. Suy ra `level`: 5xx→error, 4xx→warn, còn lại→info |
-| `backend` | **JSON** (`backend/src/logger.js`) | Bóc level/route/status/duration_ms, lấy luôn mốc thời gian do app ghi |
+| `nginx` | **JSON** (đã đổi trong `webapp/nginx/default.conf`) | `stage.json` bóc status/method/path/request_time. Suy ra `level`: 5xx→error, 4xx→warn, còn lại→info |
+| `backend` | **JSON** (`webapp/backend/src/logger.js`) | Bóc level/route/status/duration_ms, lấy luôn mốc thời gian do app ghi |
 | `frontend` | combined (mặc định) | Regex bóc method/status |
 | `db` (MySQL) | `[System] [MY-010931] …` | Regex bóc mức trong ngoặc vuông → error/warn/info |
 | `prometheus`, `grafana`, `loki`, 2 exporter | logfmt (`level=info …`) | `stage.logfmt` lấy key `level` |
@@ -426,7 +453,7 @@ Hàng "Phân tích log web" cố ý tính **lại** request/giây và p95 từ l
 
 | Giới hạn | Giá trị | Ở đâu |
 | -------- | ------- | ----- |
-| Giữ log | 7 ngày (`LOKI_RETENTION_PERIOD`) | `loki/loki-config.yml` |
+| Giữ log | 7 ngày (`LOKI_RETENTION_PERIOD`) | `monitoring/loki/loki-config.yml` |
 | Tốc độ nhận log | 8 MB/s (burst 16 MB) | 〃 |
 | Một stream tối đa | 4 MB/s | 〃 |
 | Độ dài 1 dòng | 256 KB (dài hơn thì cắt) | 〃 |
@@ -453,7 +480,7 @@ Log `/health` và `/metrics` của backend để mức `debug` nên **mặc đ�
 Các user được **tự tạo khi MySQL khởi tạo lần đầu**:
 
 - `root`, `ecommerce_app` do image MySQL tạo từ biến `MYSQL_*` trong `.env`.
-- `exporter` do script `mysql/init/01-exporter-user.sh` tạo.
+- `exporter` do script `webapp/mysql/init/01-exporter-user.sh` tạo.
 
 **Chỉ chạy khi volume MySQL còn trống.** Nếu bạn đổi mật khẩu trong `.env` **sau khi** đã chạy lần đầu, MySQL **không** tự cập nhật. Xem mục 8.
 
@@ -494,12 +521,12 @@ Tạo tải cho kịch bản 5 — cách nhanh và thô (chạy trên EC2):
 while true; do curl -s -o /dev/null http://localhost/api/products; done
 ```
 
-Cách này chạy **tuần tự** nên chỉ đạt khoảng 30 request/giây — không đủ để ép hệ thống. Muốn tải thật thì dùng **k6** (`loadtest/load.js`), nó mô phỏng nhiều khách **đồng thời**:
+Cách này chạy **tuần tự** nên chỉ đạt khoảng 30 request/giây — không đủ để ép hệ thống. Muốn tải thật thì dùng **k6** (`webapp/loadtest/load.js`), nó mô phỏng nhiều khách **đồng thời**:
 
 ```bash
-# Chép thư mục loadtest/ của repo lên EC2 trước (ví dụ /opt/ecommerce/loadtest)
+# Chép thư mục webapp/loadtest/ của repo lên EC2 trước (ví dụ /opt/ecommerce/loadtest)
 docker run --rm --network ecommerce-shared \
-  -v "$PWD/loadtest:/scripts:ro" grafana/k6:0.54.0 run /scripts/load.js
+  -v "$PWD/loadtest:/scripts:ro" monitoring/grafana/k6:0.54.0 run /scripts/load.js
 ```
 
 Kịch bản tăng tải theo bậc 10 → 50 → 120 khách đồng thời trong khoảng 3 phút, trộn các loại request theo tỉ lệ giống thật (xem danh sách sản phẩm nhiều nhất, đặt hàng ít nhất).
@@ -526,11 +553,11 @@ Mỗi kịch bản đỏ quá 1 phút thì Alertmanager tự nhắn Telegram / m
 
 | # | Lỗi phát hiện | Hậu quả | Đã sửa thành | File |
 | - | ------------- | ------- | ------------ | ---- |
-| 1 | `db.js` vẫn là code **SQLite** (`better-sqlite3`), trong khi các route gọi `pool` của **MySQL**. `better-sqlite3` cũng không có trong `package.json` | Backend **crash ngay khi khởi động** | Viết lại `db.js` bằng **MySQL** (`mysql2`): pool kết nối, tự chờ MySQL sẵn sàng (retry 30 lần × 2s), tạo bảng, seed 6 sản phẩm | `backend/src/db.js` |
-| 2 | Giá tiền nếu để kiểu `DECIMAL`, thư viện mysql2 mặc định trả về **chuỗi** `"1290000.00"` | Tính tổng đơn thành **nối chuỗi** thay vì cộng số | Bật `decimalNumbers: true`. Cột giá dùng `DECIMAL(12,2)` (chuẩn cho tiền, không sai số như số thực) | `backend/src/db.js` |
+| 1 | `db.js` vẫn là code **SQLite** (`better-sqlite3`), trong khi các route gọi `pool` của **MySQL**. `better-sqlite3` cũng không có trong `package.json` | Backend **crash ngay khi khởi động** | Viết lại `db.js` bằng **MySQL** (`mysql2`): pool kết nối, tự chờ MySQL sẵn sàng (retry 30 lần × 2s), tạo bảng, seed 6 sản phẩm | `webapp/backend/src/db.js` |
+| 2 | Giá tiền nếu để kiểu `DECIMAL`, thư viện mysql2 mặc định trả về **chuỗi** `"1290000.00"` | Tính tổng đơn thành **nối chuỗi** thay vì cộng số | Bật `decimalNumbers: true`. Cột giá dùng `DECIMAL(12,2)` (chuẩn cho tiền, không sai số như số thực) | `webapp/backend/src/db.js` |
 | 3 | `.env` đặt `MYSQL_USER=root` | Image MySQL 8 **từ chối khởi động** (không cho tạo lại user root) | Tạo user riêng `ecommerce_app` cho web (xem mục 5) | `.env`, `docker-compose.yml` |
 | 4 | Backend trong Docker đọc `DB_HOST=localhost` | Trong container, `localhost` là **chính container backend**, không phải MySQL → không kết nối được | Compose đặt cố định `DB_HOST=db` (tên service MySQL) | `docker-compose.yml` |
-| 5 | `server.js` không gọi `dotenv`, dù README cũ nói có | Chạy `npm start` local không đọc được `.env` | Nạp `.env` ở thư mục gốc project | `backend/src/server.js` |
+| 5 | `server.js` không gọi `dotenv`, dù README cũ nói có | Chạy `npm start` local không đọc được `.env` | Nạp `.env` ở thư mục gốc project | `webapp/backend/src/server.js` |
 | 6 | `.env.example` bị xoá, nội dung mẫu lại nằm trong `.env` thật | Người clone về không có file mẫu | Khôi phục `.env.example` (mật khẩu `change_me_...`). `.env` thật dùng mật khẩu ngẫu nhiên | `.env.example` |
 
 ### 7.2. Nâng lên chuẩn production
@@ -552,11 +579,11 @@ Mỗi kịch bản đỏ quá 1 phút thì Alertmanager tự nhắn Telegram / m
 
 | Thêm gì | File |
 | ------- | ---- |
-| Backend tự xuất số bằng `prom-client` (đếm request, đo thời gian phản hồi, CPU/RAM Node.js) | `backend/src/metrics.js`, `backend/src/server.js` |
-| Nginx bật `stub_status` ở port nội bộ 8081, chỉ cho IP mạng nội bộ | `nginx/default.conf` |
+| Backend tự xuất số bằng `prom-client` (đếm request, đo thời gian phản hồi, CPU/RAM Node.js) | `webapp/backend/src/metrics.js`, `webapp/backend/src/server.js` |
+| Nginx bật `stub_status` ở port nội bộ 8081, chỉ cho IP mạng nội bộ | `webapp/nginx/default.conf` |
 | Container `nginx-exporter` (`nginx/nginx-prometheus-exporter:1.3.0`) | `docker-compose.yml` |
-| Script tạo user `exporter` chỉ đọc + container `mysqld-exporter` (`prom/mysqld-exporter:v0.15.1`) | `mysql/init/01-exporter-user.sh`, `docker-compose.yml` |
-| Container `prometheus` (`prom/prometheus:v3.1.0`), cấu hình 4 job, lưu 15 ngày/5GB, chỉ mở trên `localhost` | `prometheus/prometheus.yml`, `docker-compose.yml` |
+| Script tạo user `exporter` chỉ đọc + container `mysqld-exporter` (`prom/mysqld-exporter:v0.15.1`) | `webapp/mysql/init/01-exporter-user.sh`, `docker-compose.yml` |
+| Container `prometheus` (`prom/prometheus:v3.1.0`), cấu hình 4 job, lưu 15 ngày/5GB, chỉ mở trên `localhost` | `monitoring/prometheus/prometheus.yml`, `docker-compose.yml` |
 
 Đã kiểm tra thực tế: 4 target **UP**, `up` = 1, web đặt hàng được, `/metrics` công khai trả 404, port 8081 không truy cập được từ ngoài.
 
@@ -565,10 +592,10 @@ Mỗi kịch bản đỏ quá 1 phút thì Alertmanager tự nhắn Telegram / m
 | Thêm gì | File |
 | ------- | ---- |
 | Container `grafana` (`grafana/grafana:11.3.0`), chỉ mở trên `localhost:3001`, bắt buộc đăng nhập, tắt tự đăng ký, tắt gửi thống kê ra ngoài, dữ liệu trong volume `grafana-data` | `docker-compose.yml` |
-| Tự kết nối Prometheus khi khởi động | `grafana/provisioning/datasources/prometheus.yml` |
-| Tự nạp dashboard từ file, khoá sửa trên giao diện (dashboard quản lý bằng git) | `grafana/provisioning/dashboards/shop.yml` |
-| Dashboard **Shop Overview**: 4 hàng, 24 ô, tự làm mới 15s, đặt làm trang chủ | `grafana/dashboards/shop-overview.json` |
-| Thư mục rỗng cho provisioning cảnh báo (tránh log lỗi, dùng ở bước 6) | `grafana/provisioning/alerting/.gitkeep` |
+| Tự kết nối Prometheus khi khởi động | `monitoring/grafana/provisioning/datasources/prometheus.yml` |
+| Tự nạp dashboard từ file, khoá sửa trên giao diện (dashboard quản lý bằng git) | `monitoring/grafana/provisioning/dashboards/shop.yml` |
+| Dashboard **Shop Overview**: 4 hàng, 24 ô, tự làm mới 15s, đặt làm trang chủ | `monitoring/grafana/dashboards/shop-overview.json` |
+| Thư mục rỗng cho provisioning cảnh báo (tránh log lỗi, dùng ở bước 6) | `monitoring/grafana/provisioning/alerting/.gitkeep` |
 
 Đã kiểm tra thực tế:
 
@@ -581,12 +608,12 @@ Mỗi kịch bản đỏ quá 1 phút thì Alertmanager tự nhắn Telegram / m
 
 | # | Phát hiện | Đã sửa thành | File |
 | - | --------- | ------------ | ---- |
-| 17 | Ô "Tỉ lệ lỗi 5xx" tính cả `/health`, `/metrics` vào mẫu số. Đây là request tự động luôn thành công | Chỉ tính request của khách. Khi tắt MySQL, tỉ lệ đo được ~87% (sát thực tế) thay vì ~27% | `grafana/dashboards/shop-overview.json` |
-| 18 | Ô "Kết nối bị bỏ" tô đỏ toàn nền dù giá trị = 0. Lúc demo dễ hiểu nhầm là có sự cố | Chỉ vẽ vạch ngưỡng | `grafana/dashboards/shop-overview.json` |
-| 19 | Backend gửi header `X-Powered-By: Express`, nginx ghi rõ version trong header/trang lỗi | Tắt cả hai (`app.disable('x-powered-by')`, `server_tokens off`) | `backend/src/server.js`, `nginx/default.conf` |
+| 17 | Ô "Tỉ lệ lỗi 5xx" tính cả `/health`, `/metrics` vào mẫu số. Đây là request tự động luôn thành công | Chỉ tính request của khách. Khi tắt MySQL, tỉ lệ đo được ~87% (sát thực tế) thay vì ~27% | `monitoring/grafana/dashboards/shop-overview.json` |
+| 18 | Ô "Kết nối bị bỏ" tô đỏ toàn nền dù giá trị = 0. Lúc demo dễ hiểu nhầm là có sự cố | Chỉ vẽ vạch ngưỡng | `monitoring/grafana/dashboards/shop-overview.json` |
+| 19 | Backend gửi header `X-Powered-By: Express`, nginx ghi rõ version trong header/trang lỗi | Tắt cả hai (`app.disable('x-powered-by')`, `server_tokens off`) | `webapp/backend/src/server.js`, `webapp/nginx/default.conf` |
 | 20 | Nginx khởi động trước khi backend sẵn sàng | Nginx đợi backend **healthy** mới bật | `docker-compose.yml` |
 | 21 | `.gitignore` còn dòng của SQLite (thừa), và chỉ chặn đúng file `.env` | Bỏ dòng thừa. Chặn mọi `.env.*` trừ `.env.example` | `.gitignore` |
-| 22 | Script tạo user `exporter` có lệnh `FLUSH PRIVILEGES` thừa (`CREATE USER`/`GRANT` đã tự có hiệu lực) | Bỏ | `mysql/init/01-exporter-user.sh` |
+| 22 | Script tạo user `exporter` có lệnh `FLUSH PRIVILEGES` thừa (`CREATE USER`/`GRANT` đã tự có hiệu lực) | Bỏ | `webapp/mysql/init/01-exporter-user.sh` |
 | 23 | README ghi chạy backend local là "mở web ở :3000", thực tế chỉ có API | Sửa lại cho đúng | `README.md` |
 
 **Về commit `f6b9e3f` trên GitHub** ("Fix db.js back to MySQL…"): commit này cũng chuyển `db.js` sang MySQL, song song với bài này. Khi gộp, **giữ bản `db.js` của bài này** vì:
@@ -594,7 +621,7 @@ Mỗi kịch bản đỏ quá 1 phút thì Alertmanager tự nhắn Telegram / m
 - Bản kia tự dùng `root`/`root` khi thiếu biến môi trường. Bản này không có giá trị mặc định cho user và mật khẩu, nên không bao giờ âm thầm chạy bằng root.
 - Bản kia tự chạy `CREATE DATABASE` (cần quyền cao). Bản này để MySQL container tạo database, app chỉ có quyền trong database của nó.
 
-Phần chú thích commit đó thêm vào `docker-compose.yml` và `nginx/default.conf` đã được thể hiện tương đương trong bản hiện tại.
+Phần chú thích commit đó thêm vào `docker-compose.yml` và `webapp/nginx/default.conf` đã được thể hiện tương đương trong bản hiện tại.
 
 ### 7.6. Tầng log: Alloy + Loki (bước 4/8)
 
@@ -602,19 +629,19 @@ Phần chú thích commit đó thêm vào `docker-compose.yml` và `nginx/defaul
 
 | Thêm gì | File |
 | ------- | ---- |
-| Container `loki` (`grafana/loki:3.7.6`) — single binary, TSDB schema v13, giữ 7 ngày, giới hạn tốc độ nhận log, chỉ mở `localhost:3100` | `loki/loki-config.yml`, `docker-compose.yml` |
-| Container `alloy` (`grafana/alloy:v1.20.1`) — gom log qua docker socket (xem lưu ý bảo mật #31), parse riêng cho từng service, chuẩn hoá `level`, đẩy sang Loki | `alloy/config.alloy`, `docker-compose.yml` |
-| Backend xuất **log JSON có cấu trúc**, 1 dòng/request, kèm `route`/`status`/`duration_ms`; `/health` + `/metrics` hạ xuống mức `debug` để không nhiễu | `backend/src/logger.js`, `backend/src/server.js`, `backend/src/db.js` |
-| Nginx đổi access log sang **JSON** (`log_format json_access`) để parse được thành field | `nginx/default.conf` |
-| Grafana thêm datasource **Loki** và dashboard **Shop Logs** (18 ô, 3 ô lọc, 4 hàng) | `grafana/provisioning/datasources/loki.yml`, `grafana/dashboards/shop-logs.json` |
+| Container `loki` (`grafana/loki:3.7.6`) — single binary, TSDB schema v13, giữ 7 ngày, giới hạn tốc độ nhận log, chỉ mở `localhost:3100` | `monitoring/loki/loki-config.yml`, `docker-compose.yml` |
+| Container `alloy` (`grafana/alloy:v1.20.1`) — gom log qua docker socket (xem lưu ý bảo mật #31), parse riêng cho từng service, chuẩn hoá `level`, đẩy sang Loki | `monitoring/alloy/config.alloy`, `docker-compose.yml` |
+| Backend xuất **log JSON có cấu trúc**, 1 dòng/request, kèm `route`/`status`/`duration_ms`; `/health` + `/metrics` hạ xuống mức `debug` để không nhiễu | `webapp/backend/src/logger.js`, `webapp/backend/src/server.js`, `webapp/backend/src/db.js` |
+| Nginx đổi access log sang **JSON** (`log_format json_access`) để parse được thành field | `webapp/nginx/default.conf` |
+| Grafana thêm datasource **Loki** và dashboard **Shop Logs** (18 ô, 3 ô lọc, 4 hàng) | `monitoring/grafana/provisioning/datasources/loki.yml`, `monitoring/grafana/dashboards/shop-logs.json` |
 
 **Lỗi phát hiện khi test và đã sửa:**
 
 | # | Lỗi phát hiện | Hậu quả | Đã sửa thành | File |
 | - | ------------- | ------- | ------------ | ---- |
-| 24 | **Nginx nhớ IP cũ của backend.** Nginx phân giải tên `backend` một lần lúc khởi động. Mỗi lần `docker compose up -d --build` tạo lại container backend, nó nhận IP mới | **Toàn bộ API trả 502** cho tới khi restart nginx — vỡ mỗi lần deploy lại. Đã gặp thật: backend đổi sang `172.19.0.10` mà nginx vẫn gọi `172.19.0.5` | Dùng DNS nội bộ Docker `resolver 127.0.0.11 valid=10s` + đặt upstream vào **biến** trong `proxy_pass` → nginx phân giải lại theo từng request | `nginx/default.conf` |
-| 25 | **Nhãn `route` sai với mọi request lỗi.** Express phục hồi `req.baseUrl` về rỗng trước khi lỗi tới error handler, nên lúc đọc nhãn thì baseUrl đã mất | Mọi lỗi 500 bị gắn `route="/"` → biểu đồ "lỗi 5xx theo trang" **vô dụng**, không biết trang nào vỡ. Ảnh hưởng cả Prometheus lẫn Loki | Đóng dấu `req.mountPath` khi request vào router; hàm `routeTemplate()` dùng chung cho metrics và log. Nay 500 hiện đúng `/api/products/`, `/api/products/:id`, `/api/orders/` | `backend/src/http-route.js`, `metrics.js`, `logger.js`, `server.js` |
-| 26 | Access log nginx bị ghi **2 lần** (1 bản combined + 1 bản JSON), do `access_log` khai ở http context **cộng dồn** với bản mặc định | Loki lưu gấp đôi, mọi phép đếm từ log sai gấp 2 | Khai `access_log` **trong `server` block** để ghi đè bản mặc định | `nginx/default.conf` |
+| 24 | **Nginx nhớ IP cũ của backend.** Nginx phân giải tên `backend` một lần lúc khởi động. Mỗi lần `docker compose up -d --build` tạo lại container backend, nó nhận IP mới | **Toàn bộ API trả 502** cho tới khi restart nginx — vỡ mỗi lần deploy lại. Đã gặp thật: backend đổi sang `172.19.0.10` mà nginx vẫn gọi `172.19.0.5` | Dùng DNS nội bộ Docker `resolver 127.0.0.11 valid=10s` + đặt upstream vào **biến** trong `proxy_pass` → nginx phân giải lại theo từng request | `webapp/nginx/default.conf` |
+| 25 | **Nhãn `route` sai với mọi request lỗi.** Express phục hồi `req.baseUrl` về rỗng trước khi lỗi tới error handler, nên lúc đọc nhãn thì baseUrl đã mất | Mọi lỗi 500 bị gắn `route="/"` → biểu đồ "lỗi 5xx theo trang" **vô dụng**, không biết trang nào vỡ. Ảnh hưởng cả Prometheus lẫn Loki | Đóng dấu `req.mountPath` khi request vào router; hàm `routeTemplate()` dùng chung cho metrics và log. Nay 500 hiện đúng `/api/products/`, `/api/products/:id`, `/api/orders/` | `webapp/backend/src/http-route.js`, `metrics.js`, `logger.js`, `server.js` |
+| 26 | Access log nginx bị ghi **2 lần** (1 bản combined + 1 bản JSON), do `access_log` khai ở http context **cộng dồn** với bản mặc định | Loki lưu gấp đôi, mọi phép đếm từ log sai gấp 2 | Khai `access_log` **trong `server` block** để ghi đè bản mặc định | `webapp/nginx/default.conf` |
 | 27 | Healthcheck của `loki`/`alloy` dùng `wget` | Cả 2 image là **distroless**, không có `sh`/`wget`/`curl` → lệnh luôn fail, container bị báo `unhealthy` oan và chặn `depends_on` | Bỏ healthcheck 2 service này, Alloy chỉ `depends_on: loki` (không chờ healthy) vì `loki.write` **tự retry** nên không mất log | `docker-compose.yml` |
 
 **Đã kiểm tra thực tế:**
@@ -628,7 +655,7 @@ Phần chú thích commit đó thêm vào `docker-compose.yml` và `nginx/defaul
 
 ### 7.7. Kiểm chứng bằng load test: 3 nguồn độc lập có khớp nhau không
 
-Chạy `loadtest/load.js` (k6, tăng dần tới 120 khách đồng thời, 3 phút 5 giây). k6 đếm ở phía **khách**, Prometheus đếm ở phía **server**, Loki đếm theo **số dòng log**. Ba nguồn hoàn toàn độc lập:
+Chạy `webapp/loadtest/load.js` (k6, tăng dần tới 120 khách đồng thời, 3 phút 5 giây). k6 đếm ở phía **khách**, Prometheus đếm ở phía **server**, Loki đếm theo **số dòng log**. Ba nguồn hoàn toàn độc lập:
 
 | Hạng mục | k6 đếm | Đo được | Lệch |
 | -------- | ------ | ------- | ---- |
@@ -678,12 +705,12 @@ Soát lại commit "Add log pipeline: Alloy + Loki" theo 2 tiêu chí: **logic c
 
 | # | Vấn đề phát hiện | Hậu quả | Đã sửa thành | File |
 | - | ---------------- | ------- | ------------ | ---- |
-| 28 | **Dòng `[notice]` của nginx bị gắn nhãn `level=error`.** Template của Alloy coi mọi dòng error log của nginx (có `[mức]` trong ngoặc vuông) là `error`, kể cả `[notice]` | Mỗi lần nginx khởi động in ra vài dòng `[notice] start worker process` → ô **"Dòng ERROR"** trên dashboard Shop Logs tăng vọt dù không có lỗi gì. Lúc test, 1 lần restart nginx tạo ra 10 "lỗi" giả | Ánh xạ đúng theo mức: `[notice]` → `info`, `[warn]` → `warn`, `[error]`/`[crit]`/`[alert]`/`[emerg]` → `error`. Đã test: restart nginx, toàn bộ dòng `[notice]` mang nhãn `info` | `alloy/config.alloy` |
-| 29 | **Log backend không ghi được IP thật của khách.** Backend đứng sau nginx nên mọi kết nối đến backend đều từ container nginx. Express mặc định không đọc header `X-Forwarded-For` mà nginx gửi kèm | Mọi dòng log backend đều có `ip` là IP nội bộ của nginx (ví dụ `172.18.0.8`) → không biết khách nào gây lỗi, không truy được ai spam | Thêm `app.set('trust proxy', 1)`: tin **đúng 1 lớp proxy** (nginx). Express lấy IP mà nginx tự ghi vào cuối `X-Forwarded-For` và bỏ qua phần khách tự gửi lên, nên khách **không giả mạo** IP được. (Lúc đầu thử `'loopback, uniquelocal'` thì bị giả mạo được khi chạy trên Docker Desktop, vì IP của khách khi đó cũng là IP nội bộ — đã test và đổi sang `1`) | `backend/src/server.js` |
-| 30 | **Log backend ghi cả query string.** Trường `path` dùng `req.originalUrl` (ví dụ `/api/orders?email=a@b.com`), trong khi nginx đã cố ý dùng `$uri` để **bỏ** query string | Hai nơi làm ngược nhau; nếu sau này có API nhận email/token qua query string thì dữ liệu nhạy cảm nằm trong Loki 7 ngày, ai xem được Grafana đều đọc được | Cắt bỏ phần sau dấu `?`: `req.originalUrl.split('?')[0]` — giờ log backend và log nginx cùng một quy tắc | `backend/src/logger.js` |
+| 28 | **Dòng `[notice]` của nginx bị gắn nhãn `level=error`.** Template của Alloy coi mọi dòng error log của nginx (có `[mức]` trong ngoặc vuông) là `error`, kể cả `[notice]` | Mỗi lần nginx khởi động in ra vài dòng `[notice] start worker process` → ô **"Dòng ERROR"** trên dashboard Shop Logs tăng vọt dù không có lỗi gì. Lúc test, 1 lần restart nginx tạo ra 10 "lỗi" giả | Ánh xạ đúng theo mức: `[notice]` → `info`, `[warn]` → `warn`, `[error]`/`[crit]`/`[alert]`/`[emerg]` → `error`. Đã test: restart nginx, toàn bộ dòng `[notice]` mang nhãn `info` | `monitoring/alloy/config.alloy` |
+| 29 | **Log backend không ghi được IP thật của khách.** Backend đứng sau nginx nên mọi kết nối đến backend đều từ container nginx. Express mặc định không đọc header `X-Forwarded-For` mà nginx gửi kèm | Mọi dòng log backend đều có `ip` là IP nội bộ của nginx (ví dụ `172.18.0.8`) → không biết khách nào gây lỗi, không truy được ai spam | Thêm `app.set('trust proxy', 1)`: tin **đúng 1 lớp proxy** (nginx). Express lấy IP mà nginx tự ghi vào cuối `X-Forwarded-For` và bỏ qua phần khách tự gửi lên, nên khách **không giả mạo** IP được. (Lúc đầu thử `'loopback, uniquelocal'` thì bị giả mạo được khi chạy trên Docker Desktop, vì IP của khách khi đó cũng là IP nội bộ — đã test và đổi sang `1`) | `webapp/backend/src/server.js` |
+| 30 | **Log backend ghi cả query string.** Trường `path` dùng `req.originalUrl` (ví dụ `/api/orders?email=a@b.com`), trong khi nginx đã cố ý dùng `$uri` để **bỏ** query string | Hai nơi làm ngược nhau; nếu sau này có API nhận email/token qua query string thì dữ liệu nhạy cảm nằm trong Loki 7 ngày, ai xem được Grafana đều đọc được | Cắt bỏ phần sau dấu `?`: `req.originalUrl.split('?')[0]` — giờ log backend và log nginx cùng một quy tắc | `webapp/backend/src/logger.js` |
 | 31 | **Comment sai về an toàn của docker socket.** Comment cũ nói mount `docker.sock:ro` thì Alloy "chỉ đọc được, không điều khiển Docker" | Hiểu sai rủi ro. `:ro` chỉ chặn ghi vào **file** socket, **không** chặn lệnh gửi **qua** socket: container có socket vẫn tạo/xoá container, mount ổ đĩa host được = **quyền root trên máy** | Sửa comment và README cho đúng. Giữ nguyên cách chạy vì chấp nhận được cho demo. Ghi chú hướng production: đặt một **docker-socket-proxy** ở giữa, chỉ mở API đọc (containers, events, logs) | `docker-compose.yml`, `README.md` |
-| 32 | **Crash của backend bị cắt thành nhiều dòng log.** Khi có lỗi không ai bắt, Node in stack trace ra nhiều dòng thường (không phải JSON) | Loki lưu mỗi dòng của stack trace thành một bản ghi riêng, mức `info` → khó đọc, và lỗi crash **không** hiện trong ô "Dòng ERROR" | Bắt `uncaughtException` và `unhandledRejection`, ghi thành **một** dòng JSON mức `error` kèm `stack`, rồi thoát để Docker tự bật lại container (`restart: unless-stopped`). Riêng lỗi xảy ra **trước** khi logger được nạp (ví dụ thiếu thư viện lúc khởi động) thì vẫn là nhiều dòng — trường hợp này hiếm và nhìn `docker logs ecommerce-backend` là thấy ngay | `backend/src/server.js` |
-| 33 | **Thời gian truy vấn log ghi cứng `168h`.** `max_query_lookback` không đi theo biến `LOKI_RETENTION_PERIOD` | Nếu tăng thời gian giữ log lên 30 ngày trong `.env` mà quên sửa dòng này, Grafana vẫn chỉ xem được 7 ngày gần nhất dù dữ liệu cũ vẫn còn trên ổ đĩa | Dùng chung biến: `max_query_lookback: ${LOKI_RETENTION_PERIOD}`. Đổi 1 chỗ trong `.env` là cả 2 cùng đổi | `loki/loki-config.yml` |
+| 32 | **Crash của backend bị cắt thành nhiều dòng log.** Khi có lỗi không ai bắt, Node in stack trace ra nhiều dòng thường (không phải JSON) | Loki lưu mỗi dòng của stack trace thành một bản ghi riêng, mức `info` → khó đọc, và lỗi crash **không** hiện trong ô "Dòng ERROR" | Bắt `uncaughtException` và `unhandledRejection`, ghi thành **một** dòng JSON mức `error` kèm `stack`, rồi thoát để Docker tự bật lại container (`restart: unless-stopped`). Riêng lỗi xảy ra **trước** khi logger được nạp (ví dụ thiếu thư viện lúc khởi động) thì vẫn là nhiều dòng — trường hợp này hiếm và nhìn `docker logs ecommerce-backend` là thấy ngay | `webapp/backend/src/server.js` |
+| 33 | **Thời gian truy vấn log ghi cứng `168h`.** `max_query_lookback` không đi theo biến `LOKI_RETENTION_PERIOD` | Nếu tăng thời gian giữ log lên 30 ngày trong `.env` mà quên sửa dòng này, Grafana vẫn chỉ xem được 7 ngày gần nhất dù dữ liệu cũ vẫn còn trên ổ đĩa | Dùng chung biến: `max_query_lookback: ${LOKI_RETENTION_PERIOD}`. Đổi 1 chỗ trong `.env` là cả 2 cùng đổi | `monitoring/loki/loki-config.yml` |
 
 **Đã kiểm tra lại sau khi sửa** (chạy đủ 10 container):
 
@@ -701,9 +728,9 @@ Hai việc chuẩn bị cho lúc đưa lên EC2. Theo thoả thuận: **chưa** 
 
 | # | Thêm gì | Vì sao | Làm ra sao | File |
 | - | ------- | ------ | ---------- | ---- |
-| 34 | **node-exporter**: đo CPU, RAM, ổ đĩa, mạng của **cả máy chủ** | Trước đây chỉ đo từng ứng dụng (backend, nginx, MySQL). Nếu cả máy hết RAM hay đầy ổ đĩa thì MySQL, Loki, Prometheus chết theo mà dashboard không báo trước. EC2 tự có biểu đồ CPU, nhưng **không có RAM và ổ đĩa còn trống** nếu không cài thêm agent, nên đo từ bên trong máy là cách đơn giản nhất | Thêm service `node-exporter` (đọc ổ đĩa máy chủ ở chế độ **chỉ đọc**, không mở cổng ra ngoài). Prometheus thêm job `node` đọc `node-exporter:9100`. Dashboard Shop Overview thêm hàng **"Máy chủ (node-exporter)"**: 4 ô (còn sống, CPU %, RAM %, ổ đĩa %) và 3 biểu đồ theo thời gian; vàng từ 80%, đỏ từ 90% | `docker-compose.yml`, `prometheus/prometheus.yml`, `grafana/dashboards/shop-overview.json` |
-| 35 | **HTTPS** bằng chứng chỉ miễn phí của **Let's Encrypt** (chế độ riêng cho EC2) | Lead yêu cầu sản phẩm trên EC2 phải có HTTPS. Không có HTTPS thì mật khẩu, email, đơn hàng đi trên mạng dạng chữ rõ, ai đứng giữa đường cũng đọc được; trình duyệt còn gắn nhãn "Not secure" | Thêm **chế độ HTTPS** tách riêng, local vẫn chạy HTTP như cũ (xem giải thích bên dưới) | `nginx/https.conf`, `nginx/snippets/*`, `docker-compose.https.yml`, `certbot/www/`, `.env.example` |
-| 36 | **Tách cấu hình nginx** thành phần chung + 2 chế độ | Cấu hình HTTP và HTTPS dùng chung toàn bộ đường đi (API, `/health`, chặn `/metrics`, frontend). Chép 2 bản thì sau này sửa một bản quên bản kia | Phần chung đưa vào `nginx/snippets/` (`common-http.conf`: log JSON + stub_status; `app-locations.conf`: các đường đi; `acme.conf`: đường xác minh của Let's Encrypt). `default.conf` (HTTP) và `https.conf` (HTTPS) chỉ còn vài dòng `include` | `nginx/` |
+| 34 | **node-exporter**: đo CPU, RAM, ổ đĩa, mạng của **cả máy chủ** | Trước đây chỉ đo từng ứng dụng (backend, nginx, MySQL). Nếu cả máy hết RAM hay đầy ổ đĩa thì MySQL, Loki, Prometheus chết theo mà dashboard không báo trước. EC2 tự có biểu đồ CPU, nhưng **không có RAM và ổ đĩa còn trống** nếu không cài thêm agent, nên đo từ bên trong máy là cách đơn giản nhất | Thêm service `node-exporter` (đọc ổ đĩa máy chủ ở chế độ **chỉ đọc**, không mở cổng ra ngoài). Prometheus thêm job `node` đọc `node-exporter:9100`. Dashboard Shop Overview thêm hàng **"Máy chủ (node-exporter)"**: 4 ô (còn sống, CPU %, RAM %, ổ đĩa %) và 3 biểu đồ theo thời gian; vàng từ 80%, đỏ từ 90% | `docker-compose.yml`, `monitoring/prometheus/prometheus.yml`, `monitoring/grafana/dashboards/shop-overview.json` |
+| 35 | **HTTPS** bằng chứng chỉ miễn phí của **Let's Encrypt** (chế độ riêng cho EC2) | Lead yêu cầu sản phẩm trên EC2 phải có HTTPS. Không có HTTPS thì mật khẩu, email, đơn hàng đi trên mạng dạng chữ rõ, ai đứng giữa đường cũng đọc được; trình duyệt còn gắn nhãn "Not secure" | Thêm **chế độ HTTPS** tách riêng, local vẫn chạy HTTP như cũ (xem giải thích bên dưới) | `webapp/nginx/https.conf`, `webapp/nginx/snippets/*`, `docker-compose.https.yml`, `certbot/www/`, `.env.example` |
+| 36 | **Tách cấu hình nginx** thành phần chung + 2 chế độ | Cấu hình HTTP và HTTPS dùng chung toàn bộ đường đi (API, `/health`, chặn `/metrics`, frontend). Chép 2 bản thì sau này sửa một bản quên bản kia | Phần chung đưa vào `webapp/nginx/snippets/` (`common-http.conf`: log JSON + stub_status; `app-locations.conf`: các đường đi; `acme.conf`: đường xác minh của Let's Encrypt). `default.conf` (HTTP) và `https.conf` (HTTPS) chỉ còn vài dòng `include` | `webapp/nginx/` |
 
 **node-exporter — cần biết khi đọc số:**
 
@@ -725,7 +752,7 @@ Let's Encrypt ── gọi http://<domain>/.well-known/acme-challenge/<mã> ─�
 - **Let's Encrypt** cấp chứng chỉ miễn phí, nhưng phải chứng minh bạn giữ domain: nó gọi vào domain qua **cổng 80** để lấy một file mã. Vì vậy cổng 80 luôn phải mở, kể cả sau khi đã có HTTPS.
 - Chứng chỉ chỉ sống **90 ngày**. Container `certbot` cứ 12 tiếng hỏi "sắp hết hạn chưa?", còn dưới 30 ngày thì tự gia hạn. nginx cứ 6 tiếng tự nạp lại để dùng chứng chỉ mới (không làm rớt kết nối).
 - Chứng chỉ và khoá bí mật nằm trong **volume Docker `letsencrypt`**, không nằm trong thư mục code, nên không thể lỡ tay commit lên git.
-- Chỉ cho phép TLS 1.2 và 1.3. Có thêm header **HSTS** ("từ giờ chỉ vào bằng HTTPS"), để ngắn 1 ngày lúc mới bật; chạy ổn vài tuần rồi mới tăng lên 1 năm trong `nginx/https.conf`.
+- Chỉ cho phép TLS 1.2 và 1.3. Có thêm header **HSTS** ("từ giờ chỉ vào bằng HTTPS"), để ngắn 1 ngày lúc mới bật; chạy ổn vài tuần rồi mới tăng lên 1 năm trong `webapp/nginx/https.conf`.
 - Backend không phải sửa gì: nginx giải mã xong mới chuyển vào trong, và đã báo `X-Forwarded-Proto: https` cho backend biết.
 
 **Chạy local (máy bạn): không đổi gì.** `docker compose up -d --build` như cũ, vẫn là HTTP ở cổng `HTTP_PORT`. Không dùng `docker-compose.https.yml` ở local vì localhost không xin được chứng chỉ Let's Encrypt.
@@ -766,7 +793,7 @@ Grafana và Prometheus **vẫn chỉ mở trên localhost** của EC2 như cũ. 
 
 | # | Thêm gì | Vì sao | Làm ra sao | File |
 | - | ------- | ------ | ---------- | ---- |
-| 37 | **10 luật cảnh báo** chia 3 nhóm: có gì chết không, khách có bị lỗi hay chậm không, máy chủ còn đủ sức không | Trước đây phải **ngồi nhìn** dashboard mới biết có sự cố. Luật cảnh báo cho Prometheus **tự** kiểm tra mỗi 15 giây và bật đèn khi có chuyện | Thêm file luật, cho Prometheus đọc qua `rule_files`, mount thư mục `prometheus/rules` vào container | `prometheus/rules/alerts.yml`, `prometheus/prometheus.yml`, `docker-compose.yml` |
+| 37 | **10 luật cảnh báo** chia 3 nhóm: có gì chết không, khách có bị lỗi hay chậm không, máy chủ còn đủ sức không | Trước đây phải **ngồi nhìn** dashboard mới biết có sự cố. Luật cảnh báo cho Prometheus **tự** kiểm tra mỗi 15 giây và bật đèn khi có chuyện | Thêm file luật, cho Prometheus đọc qua `rule_files`, mount thư mục `monitoring/prometheus/rules` vào container | `monitoring/prometheus/rules/alerts.yml`, `monitoring/prometheus/prometheus.yml`, `docker-compose.yml` |
 
 **Danh sách luật** (ngưỡng nào cũng sửa được trong `alerts.yml`):
 
@@ -804,17 +831,17 @@ Grafana và Prometheus **vẫn chỉ mở trên localhost** của EC2 như cũ. 
 
 | # | Thêm gì | Vì sao | File |
 | - | ------- | ------ | ---- |
-| 38 | Kịch bản k6 **quá tải** `overload.js`: 300 khách ảo gọi liên tục không nghỉ, 30% là đặt hàng, giữ tải 16 phút (có thể rút ngắn bằng `-e HOLD=3m`, luật demo chỉ cần ~2 phút) | `load.js` (mục 7.7) quá nhẹ, không làm web "đau". Muốn xem dashboard và luật cảnh báo phản ứng thì cần tải nặng và **đủ lâu** (luật CPU, độ trễ chờ 10 phút) | `loadtest/overload.js` |
+| 38 | Kịch bản k6 **quá tải** `overload.js`: 300 khách ảo gọi liên tục không nghỉ, 30% là đặt hàng, giữ tải 16 phút (có thể rút ngắn bằng `-e HOLD=3m`, luật demo chỉ cần ~2 phút) | `load.js` (mục 7.7) quá nhẹ, không làm web "đau". Muốn xem dashboard và luật cảnh báo phản ứng thì cần tải nặng và **đủ lâu** (luật CPU, độ trễ chờ 10 phút) | `webapp/loadtest/overload.js` |
 
 Có **2 kiểu** quá tải, kết quả khác nhau, nên làm cả hai:
 
 **Kiểu 1: dồn traffic vào web (k6).** Giống ngày khuyến mãi khách vào ồ ạt.
 
 ```powershell
-docker run --rm --network tool-monitoring_appnet -v "${PWD}/loadtest:/scripts:ro" grafana/k6:0.54.0 run /scripts/overload.js
+docker run --rm --network tool-monitoring_appnet -v "${PWD}/loadtest:/scripts:ro" monitoring/grafana/k6:0.54.0 run /scripts/overload.js
 ```
 
-Muốn nặng hơn hoặc ngắn hơn: thêm `-e VUS=500 -e HOLD=5m` ngay trước `grafana/k6:0.54.0`. Dừng giữa chừng: `Ctrl+C`.
+Muốn nặng hơn hoặc ngắn hơn: thêm `-e VUS=500 -e HOLD=5m` ngay trước `monitoring/grafana/k6:0.54.0`. Dừng giữa chừng: `Ctrl+C`.
 
 **Kiểu 2: ép thẳng CPU và RAM của máy chủ (stress-ng).** Giống một chương trình khác trên cùng máy bị lỗi, ăn hết tài nguyên.
 
@@ -852,8 +879,8 @@ docker run --rm --name stress alexeiled/stress-ng:0.12.05 --cpu 0 --vm 2 --vm-by
 
 | # | Sửa gì | Vì sao | Làm ra sao | File |
 | - | ------ | ------ | ---------- | ---- |
-| 39 | **Mọi luật đỏ sau khoảng 1-2 phút** | Bản đầu dùng số trung bình 5 phút và chờ 5-10 phút: chuẩn production nhưng test rất lâu (CPU cần ~15 phút mới đỏ) | Tất cả luật đổi sang số liệu **1 phút gần nhất** (`[1m]`) và chờ **1 phút** (`for: 1m`). Ghi chú trong `alerts.yml` cách nới ra khi lên production | `prometheus/rules/alerts.yml` |
-| 40 | **Bảng "Luật đang bị phạm"** ở đầu dashboard Shop Overview | Trang `/alerts` của Prometheus **không tự làm mới**, phải F5 mới thấy thay đổi. Prometheus không có tuỳ chọn bật tự làm mới cho trang này | Prometheus tự tạo một series tên `ALERTS` cho mỗi luật đang pending/firing. Bảng mới hỏi `ALERTS{alertstate=~"pending\|firing"}`; dashboard đặt tự làm mới **5 giây**. Đỏ = FIRING, cam = PENDING; trống = mọi thứ bình thường | `grafana/dashboards/shop-overview.json` |
+| 39 | **Mọi luật đỏ sau khoảng 1-2 phút** | Bản đầu dùng số trung bình 5 phút và chờ 5-10 phút: chuẩn production nhưng test rất lâu (CPU cần ~15 phút mới đỏ) | Tất cả luật đổi sang số liệu **1 phút gần nhất** (`[1m]`) và chờ **1 phút** (`for: 1m`). Ghi chú trong `alerts.yml` cách nới ra khi lên production | `monitoring/prometheus/rules/alerts.yml` |
+| 40 | **Bảng "Luật đang bị phạm"** ở đầu dashboard Shop Overview | Trang `/alerts` của Prometheus **không tự làm mới**, phải F5 mới thấy thay đổi. Prometheus không có tuỳ chọn bật tự làm mới cho trang này | Prometheus tự tạo một series tên `ALERTS` cho mỗi luật đang pending/firing. Bảng mới hỏi `ALERTS{alertstate=~"pending\|firing"}`; dashboard đặt tự làm mới **5 giây**. Đỏ = FIRING, cam = PENDING; trống = mọi thứ bình thường | `monitoring/grafana/dashboards/shop-overview.json` |
 
 **Lưu ý khi lên production:** đặt `for: 1m` trên số 1 phút thì một cú tăng CPU ngắn (ví dụ lúc build image) cũng đủ báo. Báo quá nhiều thì người trực sẽ quen và bỏ qua, nên trước khi gắn Alertmanager gửi tin thật thì nới lại theo ghi chú ở đầu `alerts.yml`.
 
@@ -863,8 +890,8 @@ docker run --rm --name stress alexeiled/stress-ng:0.12.05 --cpu 0 --vm 2 --vm-by
 
 | # | Thêm gì | Vì sao | File |
 | - | ------- | ------ | ---- |
-| 41 | **Alertmanager** nhận cảnh báo FIRING từ Prometheus, gom nhóm, gửi **mail** | Trước đây phải mở Grafana mới biết có sự cố. Giờ sự cố tự báo tới hộp thư | `alertmanager/alertmanager.yml`, `alertmanager/entrypoint.sh`, `docker-compose.yml`, `prometheus/prometheus.yml` |
-| 42 | **Mẫu mail** tiếng Việt, cố định | Mail nào cũng cùng một khuôn để đọc nhanh: tiêu đề cho biết sự cố hay đã khắc phục, mức độ, tên luật; thân mail là bảng: sự cố, trạng thái, giờ bắt đầu/kết thúc (giờ Việt Nam), nơi bị, nên làm gì | `alertmanager/templates/email.tmpl` |
+| 41 | **Alertmanager** nhận cảnh báo FIRING từ Prometheus, gom nhóm, gửi **mail** | Trước đây phải mở Grafana mới biết có sự cố. Giờ sự cố tự báo tới hộp thư | `monitoring/alertmanager/alertmanager.yml`, `monitoring/alertmanager/entrypoint.sh`, `docker-compose.yml`, `monitoring/prometheus/prometheus.yml` |
+| 42 | **Mẫu mail** tiếng Việt, cố định | Mail nào cũng cùng một khuôn để đọc nhanh: tiêu đề cho biết sự cố hay đã khắc phục, mức độ, tên luật; thân mail là bảng: sự cố, trạng thái, giờ bắt đầu/kết thúc (giờ Việt Nam), nơi bị, nên làm gì | `monitoring/alertmanager/templates/email.tmpl` |
 | 43 | **mailpit**: hộp thư giả để test, không cần Gmail | Thử mail mà không phải dùng tài khoản thật; xem mail trên web <http://localhost:8025> | `docker-compose.yml` (profile `mail-test`) |
 
 **Đường đi của một cảnh báo:**
@@ -879,8 +906,8 @@ Prometheus (luật FIRING) ──► Alertmanager :9093 ──► gom nhóm 10s 
 
 - Tiêu đề: `[SỰ CỐ][CRITICAL] MySQLDown - Shop Demo` hoặc `[ĐÃ KHẮC PHỤC][CRITICAL] MySQLDown - Shop Demo`. Nhiều nơi cùng bị thì thêm `(3 nơi)`.
 - Đầu mail có dải màu: **đỏ** = critical, **cam** = warning, **xanh** = đã khắc phục.
-- Thân mail, mỗi nơi bị một bảng: Sự cố · Trạng thái · Bắt đầu lúc · Kết thúc lúc (chỉ khi đã hết) · Nơi bị · Nên làm gì. Nội dung lấy từ `summary` và `description` của luật trong `prometheus/rules/alerts.yml`, nên sửa chữ ở đó là mail đổi theo.
-- Đổi màu, đổi bố cục: sửa `alertmanager/templates/email.tmpl` rồi `docker restart ecommerce-alertmanager`.
+- Thân mail, mỗi nơi bị một bảng: Sự cố · Trạng thái · Bắt đầu lúc · Kết thúc lúc (chỉ khi đã hết) · Nơi bị · Nên làm gì. Nội dung lấy từ `summary` và `description` của luật trong `monitoring/prometheus/rules/alerts.yml`, nên sửa chữ ở đó là mail đổi theo.
+- Đổi màu, đổi bố cục: sửa `monitoring/alertmanager/templates/email.tmpl` rồi `docker restart ecommerce-alertmanager`.
 
 **Nhịp gửi** (trong `alertmanager.yml`): gom các cảnh báo cùng tên luật vào **1 mail**; chờ 10 giây để gom; có thêm nơi bị thì gửi cập nhật sau 1 phút; sự cố chưa hết thì **nhắc lại mỗi 1 tiếng** (không gửi mỗi phút). Ổ đĩa đầy (`HostDiskFull`) đang bật thì không gửi thêm mail "sắp đầy"; MySQL chết thì không gửi thêm mail "nhiều kết nối".
 
@@ -935,8 +962,8 @@ Mở <http://localhost:8025> để xem mail.
 
 | # | Thêm gì | Vì sao | File |
 | - | ------- | ------ | ---- |
-| 44 | Kênh **Telegram** cho Alertmanager, mẫu tin nhắn giống mẫu mail | Gửi mail qua Gmail cần cấp App password của tài khoản Gmail. Telegram chỉ cần một **bot** riêng, không dính tới tài khoản cá nhân nào; tin tới điện thoại ngay | `alertmanager/alertmanager.yml`, `alertmanager/templates/telegram.tmpl`, `alertmanager/entrypoint.sh`, `docker-compose.yml`, `.env.example` |
-| 45 | **Bật/tắt từng kênh bằng `.env`** | Không phải ai cũng dùng cả mail lẫn Telegram. Có `TELEGRAM_BOT_TOKEN` thì gửi Telegram; có `SMTP_HOST` thì gửi mail; có cả hai thì gửi cả hai; không có kênh nào thì Alertmanager báo lỗi rõ ràng và không chạy | `alertmanager/entrypoint.sh` |
+| 44 | Kênh **Telegram** cho Alertmanager, mẫu tin nhắn giống mẫu mail | Gửi mail qua Gmail cần cấp App password của tài khoản Gmail. Telegram chỉ cần một **bot** riêng, không dính tới tài khoản cá nhân nào; tin tới điện thoại ngay | `monitoring/alertmanager/alertmanager.yml`, `monitoring/alertmanager/templates/telegram.tmpl`, `monitoring/alertmanager/entrypoint.sh`, `docker-compose.yml`, `.env.example` |
+| 45 | **Bật/tắt từng kênh bằng `.env`** | Không phải ai cũng dùng cả mail lẫn Telegram. Có `TELEGRAM_BOT_TOKEN` thì gửi Telegram; có `SMTP_HOST` thì gửi mail; có cả hai thì gửi cả hai; không có kênh nào thì Alertmanager báo lỗi rõ ràng và không chạy | `monitoring/alertmanager/entrypoint.sh` |
 
 **Mẫu tin nhắn** (cùng nội dung với mail, Telegram không có màu nên dùng biểu tượng):
 
@@ -952,7 +979,7 @@ Nên làm gì: MySQL có thể đã chết, ... Kiểm tra: docker logs ecommerc
 Shop Demo · Alertmanager. Chưa hết sẽ nhắc lại mỗi 1 tiếng.
 ```
 
-🔴 = critical, 🟠 = warning, ✅ = đã khắc phục (kèm giờ kết thúc). Sửa mẫu ở `alertmanager/templates/telegram.tmpl` rồi `docker restart ecommerce-alertmanager`.
+🔴 = critical, 🟠 = warning, ✅ = đã khắc phục (kèm giờ kết thúc). Sửa mẫu ở `monitoring/alertmanager/templates/telegram.tmpl` rồi `docker restart ecommerce-alertmanager`.
 
 **Cài đặt (làm 1 lần, khoảng 5 phút).** Đây là đúng các bước đã chạy thành công trên máy Windows (Docker Desktop) ngày 14/10/2026.
 
@@ -1001,11 +1028,11 @@ Rà lại mọi file đã thêm/sửa từ mục 7.10 đến 7.15, chạy lại 
 
 | # | Sửa gì | Vì sao | File |
 | - | ------ | ------ | ---- |
-| 46 | `entrypoint.sh` tự **bỏ dấu cách, dấu ngoặc kép, ký tự `\r`** lỡ dán thừa vào `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Thừa 1 ký tự là Telegram báo `Unauthorized`, rất khó nhìn ra bằng mắt | `alertmanager/entrypoint.sh` |
-| 47 | Log khởi động in thêm **độ dài token** (không in token): `Kênh Telegram: BẬT (chat_id ..., token dài 46 ký tự)` | Lỗi thật đã gặp ngày 14/10: `.env` có token đủ 46 ký tự nhưng container vẫn chạy token cũ 43 ký tự (chưa `--force-recreate`). Có số này trong log là so được ngay với `.env` | `alertmanager/entrypoint.sh` |
-| 48 | Sửa các ghi chú đã cũ: "chưa có Alertmanager", "để gửi mail", "5 nơi lấy số" | Từ mục 7.14–7.15 đã có Alertmanager gửi Telegram/mail, và Prometheus lấy số ở **6** nơi (thêm node-exporter, alertmanager) | `prometheus/rules/alerts.yml`, `prometheus/prometheus.yml`, `TRA-CUU-NHANH.md`, mục 7.11 README |
+| 46 | `entrypoint.sh` tự **bỏ dấu cách, dấu ngoặc kép, ký tự `\r`** lỡ dán thừa vào `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Thừa 1 ký tự là Telegram báo `Unauthorized`, rất khó nhìn ra bằng mắt | `monitoring/alertmanager/entrypoint.sh` |
+| 47 | Log khởi động in thêm **độ dài token** (không in token): `Kênh Telegram: BẬT (chat_id ..., token dài 46 ký tự)` | Lỗi thật đã gặp ngày 14/10: `.env` có token đủ 46 ký tự nhưng container vẫn chạy token cũ 43 ký tự (chưa `--force-recreate`). Có số này trong log là so được ngay với `.env` | `monitoring/alertmanager/entrypoint.sh` |
+| 48 | Sửa các ghi chú đã cũ: "chưa có Alertmanager", "để gửi mail", "5 nơi lấy số" | Từ mục 7.14–7.15 đã có Alertmanager gửi Telegram/mail, và Prometheus lấy số ở **6** nơi (thêm node-exporter, alertmanager) | `monitoring/prometheus/rules/alerts.yml`, `monitoring/prometheus/prometheus.yml`, `TRA-CUU-NHANH.md`, mục 7.11 README |
 | 49 | `TRA-CUU-NHANH.md`: thêm luồng **Prometheus → Alertmanager → Telegram** và lệnh "sửa `.env` xong thì `--force-recreate`" | Để bảng tra cứu khớp với hệ thống hiện tại | `TRA-CUU-NHANH.md` |
-| 50 | Thêm `"5s"` vào `timepicker.refresh_intervals` của Shop Overview | Dashboard đặt `"refresh": "5s"` nhưng danh sách khoảng làm mới chỉ có 15s/30s/1m/5m. Grafana 11.3 thấy 5s không nằm trong danh sách nên **tắt luôn tự làm mới** (nút ghi "Auto refresh turned off"): bảng "Luật đang bị phạm" và mọi ô không cập nhật, phải F5. Đo bằng trình duyệt headless: trước khi sửa 0 lần gọi query trong 35 giây; sau khi sửa 91 lần, bảng tự hiện `TargetDown` PENDING → FIRING và tự biến mất khi bật lại exporter, không cần F5 | `grafana/dashboards/shop-overview.json` |
+| 50 | Thêm `"5s"` vào `timepicker.refresh_intervals` của Shop Overview | Dashboard đặt `"refresh": "5s"` nhưng danh sách khoảng làm mới chỉ có 15s/30s/1m/5m. Grafana 11.3 thấy 5s không nằm trong danh sách nên **tắt luôn tự làm mới** (nút ghi "Auto refresh turned off"): bảng "Luật đang bị phạm" và mọi ô không cập nhật, phải F5. Đo bằng trình duyệt headless: trước khi sửa 0 lần gọi query trong 35 giây; sau khi sửa 91 lần, bảng tự hiện `TargetDown` PENDING → FIRING và tự biến mất khi bật lại exporter, không cần F5 | `monitoring/grafana/dashboards/shop-overview.json` |
 
 Đã kiểm tra #46–#47: chạy Alertmanager với token cố tình kẹp dấu cách, dấu ngoặc kép và `\r` → file token còn đúng 46 ký tự, `amtool check-config` hợp lệ; không đặt kênh nào → vẫn báo lỗi rõ ràng như cũ.
 
@@ -1017,15 +1044,15 @@ Chuẩn bị đưa web ra internet: trước đây ai biết đường dẫn cũ
 
 | # | Sửa gì | Vì sao | File |
 | - | ------ | ------ | ---- |
-| 51 | **Tài khoản admin tự tạo** ở lần chạy đầu từ `ADMIN_USERNAME` / `ADMIN_PASSWORD` (`.env`, bắt buộc, tối thiểu 12 ký tự). Đã có admin thì bỏ qua | Không cần thao tác tay trong DB. Mật khẩu lưu dạng hash **scrypt** có salt riêng, không bao giờ lưu mật khẩu gốc | `backend/src/db.js`, `backend/src/auth/password.js`, `docker-compose.yml`, `.env.example` |
-| 52 | **Phiên đăng nhập** bằng cookie `sid`: HttpOnly, SameSite=Strict, tự bật Secure khi chạy HTTPS, hết hạn sau 8 giờ (`SESSION_TTL_HOURS`). DB chỉ lưu SHA-256 của token | JavaScript trên trang không đọc được cookie (XSS không lấy cắp được); lộ bảng `sessions` cũng không dùng lại được phiên | `backend/src/auth/session.js`, bảng `users`, `sessions` |
-| 53 | **Phân quyền API**: `POST/PUT/DELETE /api/products` và `GET /api/orders*` chỉ admin (401 / 403). Xem sản phẩm và **đặt hàng vẫn công khai** | Quyền tối thiểu: khách chỉ cần xem và mua | `backend/src/auth/middleware.js`, `routes/products.js`, `routes/orders.js` |
-| 54 | **Chống CSRF**: request ghi/xoá có `Origin` khác tên miền hoặc `Sec-Fetch-Site: cross-site` → 403. Bỏ `cors()` (trước đây cho mọi trang web gọi API), gỡ luôn thư viện `cors` | Trang lạ không gửi được request thay admin đang đăng nhập | `backend/src/auth/http.js`, `backend/src/server.js`, `backend/package.json` |
-| 55 | **Chống dò mật khẩu**: sai 5 lần / 15 phút (theo IP và theo tên đăng nhập) → khoá 15 phút (429). Một thông báo chung "Sai tên đăng nhập hoặc mật khẩu"; tên không tồn tại cũng tốn đúng thời gian như sai mật khẩu | Không dò được mật khẩu, không đoán được tài khoản nào tồn tại | `backend/src/auth/rate-limit.js`, `backend/src/routes/auth.js` |
-| 56 | **nginx `auth_request`**: chưa đăng nhập thì `/admin.html`, `admin.js`, `admin.css`, `tools.js` trả **302 → /login.html**, file không được gửi đi. Trang admin gắn `Cache-Control: no-store` | Lớp chặn thứ 2 ngay ở cửa vào; đăng xuất rồi bấm Back không xem lại được | `nginx/snippets/app-locations.conf` (dùng chung HTTP + HTTPS) |
-| 57 | **Trang đăng nhập** `login.html` (giao diện Tabler); trang admin có tên tài khoản, nút Đăng xuất, mục **Đổi mật khẩu** (đổi xong đăng xuất mọi máy khác); phiên hết hạn giữa chừng tự về trang đăng nhập | | `frontend/login.html`, `login.js`, `admin.html`, `admin.js` |
-| 58 | **Navbar shop**: bỏ link vào thẳng `/admin.html`. Khách thấy **Đăng nhập**; admin đã đăng nhập thấy **Quản trị** + **Đăng xuất** | `/api/auth/me` luôn trả 200 nên không làm tăng ô 4xx trên dashboard | `frontend/index.html`, `app.js`, `styles.css` |
-| 59 | `absolute_redirect off` cho chuyển hướng về trang đăng nhập | Lỗi thật gặp khi test: nginx ghép `Location: http://localhost/login.html` theo cổng **trong container** (80), trình duyệt vào bằng 8080 nên bị đẩy sang trang lỗi | `nginx/snippets/app-locations.conf` |
+| 51 | **Tài khoản admin tự tạo** ở lần chạy đầu từ `ADMIN_USERNAME` / `ADMIN_PASSWORD` (`.env`, bắt buộc, tối thiểu 12 ký tự). Đã có admin thì bỏ qua | Không cần thao tác tay trong DB. Mật khẩu lưu dạng hash **scrypt** có salt riêng, không bao giờ lưu mật khẩu gốc | `webapp/backend/src/db.js`, `webapp/backend/src/auth/password.js`, `docker-compose.yml`, `.env.example` |
+| 52 | **Phiên đăng nhập** bằng cookie `sid`: HttpOnly, SameSite=Strict, tự bật Secure khi chạy HTTPS, hết hạn sau 8 giờ (`SESSION_TTL_HOURS`). DB chỉ lưu SHA-256 của token | JavaScript trên trang không đọc được cookie (XSS không lấy cắp được); lộ bảng `sessions` cũng không dùng lại được phiên | `webapp/backend/src/auth/session.js`, bảng `users`, `sessions` |
+| 53 | **Phân quyền API**: `POST/PUT/DELETE /api/products` và `GET /api/orders*` chỉ admin (401 / 403). Xem sản phẩm và **đặt hàng vẫn công khai** | Quyền tối thiểu: khách chỉ cần xem và mua | `webapp/backend/src/auth/middleware.js`, `routes/products.js`, `routes/orders.js` |
+| 54 | **Chống CSRF**: request ghi/xoá có `Origin` khác tên miền hoặc `Sec-Fetch-Site: cross-site` → 403. Bỏ `cors()` (trước đây cho mọi trang web gọi API), gỡ luôn thư viện `cors` | Trang lạ không gửi được request thay admin đang đăng nhập | `webapp/backend/src/auth/http.js`, `webapp/backend/src/server.js`, `webapp/backend/package.json` |
+| 55 | **Chống dò mật khẩu**: sai 5 lần / 15 phút (theo IP và theo tên đăng nhập) → khoá 15 phút (429). Một thông báo chung "Sai tên đăng nhập hoặc mật khẩu"; tên không tồn tại cũng tốn đúng thời gian như sai mật khẩu | Không dò được mật khẩu, không đoán được tài khoản nào tồn tại | `webapp/backend/src/auth/rate-limit.js`, `webapp/backend/src/routes/auth.js` |
+| 56 | **nginx `auth_request`**: chưa đăng nhập thì `/admin.html`, `admin.js`, `admin.css`, `tools.js` trả **302 → /login.html**, file không được gửi đi. Trang admin gắn `Cache-Control: no-store` | Lớp chặn thứ 2 ngay ở cửa vào; đăng xuất rồi bấm Back không xem lại được | `webapp/nginx/snippets/app-locations.conf` (dùng chung HTTP + HTTPS) |
+| 57 | **Trang đăng nhập** `login.html` (giao diện Tabler); trang admin có tên tài khoản, nút Đăng xuất, mục **Đổi mật khẩu** (đổi xong đăng xuất mọi máy khác); phiên hết hạn giữa chừng tự về trang đăng nhập | | `webapp/frontend/login.html`, `login.js`, `admin.html`, `admin.js` |
+| 58 | **Navbar shop**: bỏ link vào thẳng `/admin.html`. Khách thấy **Đăng nhập**; admin đã đăng nhập thấy **Quản trị** + **Đăng xuất** | `/api/auth/me` luôn trả 200 nên không làm tăng ô 4xx trên dashboard | `webapp/frontend/index.html`, `app.js`, `styles.css` |
+| 59 | `absolute_redirect off` cho chuyển hướng về trang đăng nhập | Lỗi thật gặp khi test: nginx ghép `Location: http://localhost/login.html` theo cổng **trong container** (80), trình duyệt vào bằng 8080 nên bị đẩy sang trang lỗi | `webapp/nginx/snippets/app-locations.conf` |
 
 **Log:** ghi sự kiện `login_success`, `login_failed` (kèm lý do `wrong_password` / `unknown_user`), `login_locked`, `password_changed`, `admin_seeded`. Không ghi mật khẩu, không ghi tên người dùng gõ thử.
 
@@ -1041,9 +1068,9 @@ Chuẩn bị đưa web ra internet: trước đây ai biết đường dẫn cũ
 
 | # | Sửa gì | File |
 | - | ------ | ---- |
-| 60 | **Shop** chuyển sang giao diện sáng kiểu cửa hàng: thanh thông báo, navbar dính trên cùng, hero 2 cột có ảnh, 4 thẻ ưu điểm dùng icon SVG thay emoji, thẻ sản phẩm ảnh vuông (nhãn chỉ hiện khi sắp hết / hết hàng), footer nhiều cột, giỏ hàng có icon trống. Font **Be Vietnam Pro** (thiết kế cho tiếng Việt) | `frontend/index.html`, `styles.css`, `app.js` |
-| 61 | **Trang quản trị** (vẫn template Tabler): sidebar tối chia nhóm, nội dung sáng, thẻ thống kê có icon (thêm tổng trị giá tồn kho), bảng có ô tìm kiếm có icon và nút Sửa/Xoá dạng icon, hộp thoại 2 cột có khung xem trước ảnh, mục Monitoring hiện cả địa chỉ của tool. Icon là SVG bộ Tabler Icons (MIT) vẽ sẵn trong `admin.js`, không tải thêm gì | `frontend/admin.html`, `admin.css`, `admin.js`, `tools.js` |
-| 62 | **Trang đăng nhập** chia đôi: bên trái giới thiệu, bên phải form; nút Hiện/Ẩn mật khẩu. CSS để ngay trong trang vì `admin.css` bị nginx chặn khi chưa đăng nhập | `frontend/login.html`, `login.js` |
+| 60 | **Shop** chuyển sang giao diện sáng kiểu cửa hàng: thanh thông báo, navbar dính trên cùng, hero 2 cột có ảnh, 4 thẻ ưu điểm dùng icon SVG thay emoji, thẻ sản phẩm ảnh vuông (nhãn chỉ hiện khi sắp hết / hết hàng), footer nhiều cột, giỏ hàng có icon trống. Font **Be Vietnam Pro** (thiết kế cho tiếng Việt) | `webapp/frontend/index.html`, `styles.css`, `app.js` |
+| 61 | **Trang quản trị** (vẫn template Tabler): sidebar tối chia nhóm, nội dung sáng, thẻ thống kê có icon (thêm tổng trị giá tồn kho), bảng có ô tìm kiếm có icon và nút Sửa/Xoá dạng icon, hộp thoại 2 cột có khung xem trước ảnh, mục Monitoring hiện cả địa chỉ của tool. Icon là SVG bộ Tabler Icons (MIT) vẽ sẵn trong `admin.js`, không tải thêm gì | `webapp/frontend/admin.html`, `admin.css`, `admin.js`, `tools.js` |
+| 62 | **Trang đăng nhập** chia đôi: bên trái giới thiệu, bên phải form; nút Hiện/Ẩn mật khẩu. CSS để ngay trong trang vì `admin.css` bị nginx chặn khi chưa đăng nhập | `webapp/frontend/login.html`, `login.js` |
 | 63 | Điện thoại (390px): không trang nào bị tràn ngang. Bảng sản phẩm tự cuộn ngang trong khung (`.page-wrapper { min-width: 0 }`, `.table-responsive { position: relative }`); navbar shop ẩn bớt chữ | `admin.css`, `styles.css` |
 
 **Đã kiểm tra:** 21 bước chức năng bằng trình duyệt headless (thêm giỏ, tăng/xoá, đăng nhập, thêm/tìm/sửa/xoá sản phẩm qua giao diện, Monitoring, đăng xuất), không lỗi JavaScript; 16 + 6 test đơn vị; file admin vẫn 302 khi chưa đăng nhập, `/metrics` vẫn 404.
@@ -1066,9 +1093,9 @@ HolmesGPT tự quyết định cần tra gì, tự chạy PromQL/LogQL, rồi g�
 
 | Thêm gì | File |
 | ------- | ---- |
-| Image HolmesGPT `0.45.0` build từ PyPI (ghim phiên bản), chạy bằng user thường | `holmes/Dockerfile` |
-| Script khởi động: bỏ biến AWS trống / ký tự thừa, **dừng nếu chưa có khoá** (không gọi Bedrock), in cách đăng nhập đang dùng (không in khoá) | `holmes/entrypoint.sh` |
-| Toolset Prometheus, Loki, địa chỉ Alertmanager, `max_steps: 15` (giới hạn số lượt gọi Bedrock cho 1 câu hỏi) | `holmes/config.yaml` |
+| Image HolmesGPT `0.45.0` build từ PyPI (ghim phiên bản), chạy bằng user thường | `monitoring/holmes/Dockerfile` |
+| Script khởi động: bỏ biến AWS trống / ký tự thừa, **dừng nếu chưa có khoá** (không gọi Bedrock), in cách đăng nhập đang dùng (không in khoá) | `monitoring/holmes/entrypoint.sh` |
+| Toolset Prometheus, Loki, địa chỉ Alertmanager, `max_steps: 15` (giới hạn số lượt gọi Bedrock cho 1 câu hỏi) | `monitoring/holmes/config.yaml` |
 | Service `holmes`, **profile `ai`**: `$MON up -d` không bật nó, chỉ chạy khi gọi | `docker-compose.monitoring.yml` |
 | Biến Bedrock | `.env.monitoring.example` |
 
@@ -1126,8 +1153,8 @@ Prometheus (FIRING) ──► Alertmanager ──► Telegram: 🔴 SỰ CỐ ..
 
 | Thêm gì | File |
 | ------- | ---- |
-| Service cầu nối (Python thư viện chuẩn), dựng trên image `ecommerce-holmes` | `holmes-bridge/bridge.py`, `holmes-bridge/Dockerfile` |
-| Alertmanager thêm `webhook_configs`, chỉ bật khi `.env.monitoring` có `AI_WEBHOOK_URL` | `alertmanager/alertmanager.yml`, `alertmanager/entrypoint.sh` |
+| Service cầu nối (Python thư viện chuẩn), dựng trên image `ecommerce-holmes` | `ai-remediation/holmes-bridge/bridge.py`, `ai-remediation/holmes-bridge/Dockerfile` |
+| Alertmanager thêm `webhook_configs`, chỉ bật khi `.env.monitoring` có `AI_WEBHOOK_URL` | `monitoring/alertmanager/alertmanager.yml`, `monitoring/alertmanager/entrypoint.sh` |
 | Service `holmes-bridge` (profile `ai`, chạy nền, không publish port) | `docker-compose.monitoring.yml` |
 | Biến `AI_WEBHOOK_URL`, `AI_SEVERITIES`, `AI_MAX_PER_HOUR` | `.env.monitoring.example` |
 
@@ -1146,14 +1173,14 @@ Prometheus (FIRING) ──► Alertmanager ──► Telegram: 🔴 SỰ CỐ ..
 | ---------- | ----------- | ---------- |
 | `Bind for 0.0.0.0:80 failed: port is already allocated` | Chương trình khác trên EC2 đang dùng port 80 | Tắt chương trình đó, hoặc đổi `HTTP_PORT` trong `.env.app` |
 | `set MYSQL_... in .env.app` | Chưa tạo file `.env.*` hoặc thiếu biến | `cp .env.app.example .env.app` (tương tự `.env.monitoring`) rồi điền mật khẩu |
-| Đổi mật khẩu trong `.env` xong backend/exporter không đăng nhập được DB | MySQL chỉ tạo user **lần đầu**. Volume cũ vẫn giữ mật khẩu cũ | Không cần giữ dữ liệu: `$APP down -v` rồi `$APP up -d`. Cần giữ dữ liệu: vào MySQL bằng root đổi mật khẩu bằng `ALTER USER` |
+| Đổi mật khẩu trong `.env` xong webapp/backend/exporter không đăng nhập được DB | MySQL chỉ tạo user **lần đầu**. Volume cũ vẫn giữ mật khẩu cũ | Không cần giữ dữ liệu: `$APP down -v` rồi `$APP up -d`. Cần giữ dữ liệu: vào MySQL bằng root đổi mật khẩu bằng `ALTER USER` |
 | Target `mysql` **DOWN**, log exporter báo `Access denied` | User `exporter` chưa có (volume tạo trước khi có script) | Tạo tay bằng câu lệnh dưới đây |
 | Target nào đó DOWN | Container đó chết/khởi động lại | `docker ps` và `docker logs ecommerce-<tên-service>` |
 | Đổi `GRAFANA_ADMIN_PASSWORD` trong `.env` nhưng đăng nhập không được | Giống MySQL: mật khẩu admin Grafana chỉ được đặt **lần đầu**, sau đó lưu trong volume `grafana-data` | `docker exec ecommerce-grafana grafana cli admin reset-admin-password <mật-khẩu-mới>` |
 | Ô biểu đồ hiện "No data" | Chưa có traffic, hoặc mới bật chưa đủ 1 phút | Vào web bấm vài trang, đợi khoảng 1 phút |
 | `loki` và `alloy` **không** hiện `(healthy)` trong `docker ps` | **Bình thường, không phải lỗi.** Hai image này là distroless (không có `sh`/`wget`/`curl`) nên không đặt được healthcheck | Kiểm tra bằng tay: `curl http://127.0.0.1:3100/ready` và `curl http://127.0.0.1:12345/-/ready` |
 | Dashboard **Shop Logs** trống hoàn toàn | Alloy không đọc được docker socket | `docker logs ecommerce-alloy`. Trên Linux cần user có quyền với `/var/run/docker.sock`; service đã đặt `user: root` sẵn |
-| Shop Logs có log, nhưng **thiếu service nào đó** | Container đó đang rảnh nên không ghi log gì (ví dụ MySQL lúc không ai truy vấn), hoặc tên service không nằm trong danh sách `keep` của Alloy | Xem lại regex `keep` trong `alloy/config.remote.alloy`. Thêm service mới thì phải thêm tên vào đó |
+| Shop Logs có log, nhưng **thiếu service nào đó** | Container đó đang rảnh nên không ghi log gì (ví dụ MySQL lúc không ai truy vấn), hoặc tên service không nằm trong danh sách `keep` của Alloy | Xem lại regex `keep` trong `monitoring/alloy/config.remote.alloy`. Thêm service mới thì phải thêm tên vào đó |
 | Log nginx bị đếm gấp đôi | `access_log` khai ở http context sẽ **cộng dồn** với bản mặc định của image | Phải khai `access_log` **trong `server` block** (xem lỗi #26 ở mục 7.6) |
 | `ecommerce-alertmanager` khởi động lại liên tục | `.env` chưa bật kênh nào (Telegram hoặc mail), hoặc bật mà thiếu biến | `docker logs ecommerce-alertmanager` sẽ ghi rõ thiếu biến nào. Thêm vào `.env.monitoring` (mục 7.14 mail, 7.15 Telegram) |
 | Đã cài Telegram nhưng tắt db không có tin nào | Prometheus chạy cấu hình cũ chưa có phần `alerting`, hoặc container Alertmanager vẫn giữ token cũ | Dò theo bảng "Không nhận được tin?" ở mục 7.15. Hay gặp nhất: `docker restart ecommerce-prometheus` và `$MON up -d --force-recreate alertmanager` |
@@ -1187,24 +1214,28 @@ Mỗi thư mục có `Dockerfile` riêng: config được đóng gói vào image
 
 ```
 .
-├── docker-compose.app.yml        # EC2 — phần WEB: db, backend, frontend, nginx, 3 exporter, alloy
-├── docker-compose.monitoring.yml # EC2 — phần GIÁM SÁT: prometheus, alertmanager, loki, grafana, holmes, holmes-bridge, mailpit
-├── .env.app.example              # Mẫu biến cho phần web (file thật .env.app KHÔNG commit)
-├── .env.monitoring.example       # Mẫu biến cho phần giám sát (file thật .env.monitoring KHÔNG commit)
-├── backend/                      # REST API (Node.js + Express): src/ (server, metrics, logger, db, auth/, routes/), test/
-├── frontend/                     # Giao diện tĩnh: shop, login, admin (tools.js = mục Monitoring), icons/, vendor/
-├── nginx/                        # default.conf + snippets/ (log JSON, stub_status, /api, /admin/...), entrypoint.sh (tạo htpasswd)
-├── mysql/init/                   # Tạo user 'exporter' chỉ đọc (chạy lần đầu)
-├── alloy/config.remote.alloy     # Alloy: gom log container, parse từng service, đẩy sang Loki
-├── prometheus/                   # prometheus.yml (6 nguồn số liệu) + rules/alerts.yml (10 luật cảnh báo)
-├── alertmanager/                 # alertmanager.yml (khuôn) + entrypoint.sh + templates/ (mẫu Telegram, mail)
-├── loki/loki-config.yml          # Loki: lưu log ở đâu, giữ bao lâu, giới hạn gì
-├── grafana/                      # provisioning/ (datasource Prometheus + Loki) + dashboards/ (Shop Overview, Shop Logs)
-├── holmes/                       # HolmesGPT CLI: config.yaml (nối Prometheus/Loki/Alertmanager) + entrypoint.sh
-├── holmes-bridge/                # Cầu nối Alertmanager -> HolmesGPT -> Telegram (bridge.py)
-├── loadtest/                     # Kịch bản k6: load.js (tải thường), overload.js (quá tải)
+├── webapp/docker-compose.app.yml        # EC2 — phần WEB: db, backend, frontend, nginx, 3 exporter, alloy
+├── webapp/.env.app.example              # Mẫu biến cho phần web (file thật webapp/.env.app KHÔNG commit)
+├── monitoring/docker-compose.monitoring.yml # EC2 — phần GIÁM SÁT: prometheus, alertmanager, loki, grafana, holmes, holmes-bridge, remediator, mailpit
+├── monitoring/.env.monitoring.example   # Mẫu biến giám sát + khoá Bedrock (file thật monitoring/.env.monitoring KHÔNG commit)
+├── webapp/backend/                      # REST API (Node.js + Express): src/ (server, metrics, logger, db, auth/, routes/), test/
+├── webapp/frontend/                     # Giao diện tĩnh: shop, login, admin (tools.js = mục Monitoring), icons/, vendor/
+├── webapp/nginx/                        # default.conf + snippets/ (log JSON, stub_status, /api, /admin/...), entrypoint.sh (tạo htpasswd)
+├── webapp/mysql/init/                   # Tạo user 'exporter' chỉ đọc (chạy lần đầu)
+├── monitoring/alloy/config.remote.alloy     # Alloy: gom log container, parse từng service, đẩy sang Loki
+├── monitoring/prometheus/                   # prometheus.yml (6 nguồn số liệu) + rules/alerts.yml (10 luật cảnh báo)
+├── monitoring/alertmanager/                 # alertmanager.yml (khuôn) + entrypoint.sh + templates/ (mẫu Telegram, mail)
+├── monitoring/loki/loki-config.yml          # Loki: lưu log ở đâu, giữ bao lâu, giới hạn gì
+├── monitoring/grafana/                      # provisioning/ (datasource Prometheus + Loki) + dashboards/ (Shop Overview, Shop Logs)
+├── monitoring/holmes/                       # HolmesGPT CLI: config.yaml (nối Prometheus/Loki/Alertmanager) + entrypoint.sh
+├── ai-remediation/holmes-bridge/                # Cầu nối Alertmanager -> HolmesGPT -> Telegram (bridge.py) + runbooks/ (markdown theo cảnh báo, README2.md)
+├── ai-remediation/remediator/                   # Thực thi lệnh sửa lỗi AI đề xuất sau khi người duyệt: remediator.py, policy.json (file rule), tests/ (ai-remediation/README2.md)
+├── webapp/loadtest/                     # Kịch bản k6: load.js (tải thường), overload.js (quá tải)
+├── ai-remediation/sandbox/                      # Test cục bộ trên Docker local cho remediator (AI/Telegram giả): python ai-remediation/sandbox/run_sandbox.py (README2.md mục 8)
 ├── scripts/push-images.ps1       # Build + push toàn bộ image lên Docker Hub
 ├── TRA-CUU-NHANH.md              # Bảng tra cứu tool / port / link / lệnh
+├── README2.md                    # Phần mở rộng: runbook cho AI + remediator (đề xuất / duyệt / audit lệnh sửa lỗi)
+├── CLAUDE.md                     # Quy tắc khi dùng Claude Code trên project (không AWS, không đọc .env, không lệnh tốn tiền)
 └── README.md
 ```
 
@@ -1242,9 +1273,17 @@ curl -X POST http://localhost/api/orders \
 
 Đã xong theo slide: bước 1–2 (Docker, ứng dụng), bước 3 (exporter + Prometheus), bước 4 (Alloy + Loki), bước 5 (Grafana), bước 6 (luật cảnh báo + Alertmanager gửi Telegram / mail), bước 7–8 (HolmesGPT + Bedrock, AI tự phân tích cảnh báo — mục 7.19, 7.20). Đã chạy trên EC2 (mục 12).
 
+Phần mở rộng (xem [README2.md](ai-remediation/README2.md)): runbook markdown cho AI, remediator + file rule `ai-remediation/remediator/policy.json` + docker-proxy (AI đề xuất, người duyệt trên Telegram), audit log và panel Grafana "Remediation" trên dashboard Shop Logs. Mới thêm:
+
+- **Vòng lặp AI ↔ người duyệt**: lệnh chạy xong mà chưa ổn thì kết quả quay lại AI để đề xuất bước tiếp (tối đa `AI_MAX_ROUNDS` vòng, mỗi vòng = 1 lượt Bedrock); thoát bằng nút ⏹ hoặc `/stop`.
+- **Lệnh thay thế** khi đề xuất bị chặn (bảng `alternatives` trong policy) và ngoại lệ hẹp cho phép AI **bật lại** `ecommerce-db` đã dừng.
+- **Gõ lệnh trong chat Telegram**: `/restart|/start|/logs <container>` hoặc `docker restart backend`; lệnh nằm ngoài kho lệnh hay bị rule chặn thì báo "⛔ KHÔNG ĐƯỢC PHÉP" và không chạy gì.
+
+Đã kiểm thử bằng unit test (65 test remediator, 14 test bridge) và sandbox cục bộ (62 kiểm tra); đã triển khai và gọi Bedrock thật trên Docker local. **Chưa chạy trên EC2.**
+
 Còn để ngỏ:
 
-- Luật cảnh báo đang ở chế độ demo (`[1m]`, `for: 1m`); lên production nên nới ra theo ghi chú đầu `prometheus/rules/alerts.yml`.
+- Luật cảnh báo đang ở chế độ demo (`[1m]`, `for: 1m`); lên production nên nới ra theo ghi chú đầu `monitoring/prometheus/rules/alerts.yml`.
 - Watchdog: báo động khi chính Prometheus / Alertmanager chết (mục 7.16).
 - Cảnh báo dựa trên log (Loki ruler).
 - HTTPS + domain riêng.
@@ -1286,16 +1325,16 @@ mục — không bind-mount gì từ host:
 
 | Image | Dockerfile | Đóng gói gì |
 | ----- | ---------- | ----------- |
-| `thuanperry/ecommerce-prometheus` | `prometheus/Dockerfile` | `prometheus.yml` (target ghi tên container cố định) + `rules/` |
-| `thuanperry/ecommerce-grafana` | `grafana/Dockerfile` | `provisioning/` + `dashboards/` |
-| `thuanperry/ecommerce-loki` | `loki/Dockerfile` | `loki-config.yml` |
-| `thuanperry/ecommerce-alertmanager` | `alertmanager/Dockerfile` | `alertmanager.yml` (khuôn) + `entrypoint.sh` + `templates/` |
-| `thuanperry/ecommerce-holmes` | `holmes/Dockerfile` | `config.yaml` + `entrypoint.sh` |
-| `thuanperry/ecommerce-holmes-bridge` | `holmes-bridge/Dockerfile` | `bridge.py` (dựng trên image holmes) |
-| `thuanperry/ecommerce-nginx` | `nginx/Dockerfile` | `default.conf` + `snippets/` + `entrypoint.sh` |
-| `thuanperry/ecommerce-alloy` | `alloy/Dockerfile` | `config.remote.alloy` |
-| `thuanperry/ecommerce-db` | `mysql/Dockerfile` | `init/` |
-| `thuanperry/ecommerce-backend`, `-frontend` | `backend/Dockerfile`, `frontend/Dockerfile` | code ứng dụng |
+| `thuanperry/ecommerce-prometheus` | `monitoring/prometheus/Dockerfile` | `prometheus.yml` (target ghi tên container cố định) + `rules/` |
+| `thuanperry/ecommerce-grafana` | `monitoring/grafana/Dockerfile` | `provisioning/` + `dashboards/` |
+| `thuanperry/ecommerce-loki` | `monitoring/loki/Dockerfile` | `loki-config.yml` |
+| `thuanperry/ecommerce-alertmanager` | `monitoring/alertmanager/Dockerfile` | `alertmanager.yml` (khuôn) + `entrypoint.sh` + `templates/` |
+| `thuanperry/ecommerce-holmes` | `monitoring/holmes/Dockerfile` | `config.yaml` + `entrypoint.sh` |
+| `thuanperry/ecommerce-holmes-bridge` | `ai-remediation/holmes-bridge/Dockerfile` | `bridge.py` (dựng trên image holmes) |
+| `thuanperry/ecommerce-nginx` | `webapp/nginx/Dockerfile` | `default.conf` + `snippets/` + `entrypoint.sh` |
+| `thuanperry/ecommerce-alloy` | `monitoring/alloy/Dockerfile` | `config.remote.alloy` |
+| `thuanperry/ecommerce-db` | `webapp/mysql/Dockerfile` | `init/` |
+| `thuanperry/ecommerce-backend`, `-frontend` | `webapp/backend/Dockerfile`, `webapp/frontend/Dockerfile` | code ứng dụng |
 
 Secret (mật khẩu, token Telegram/SMTP, key Bedrock) **không** nằm trong image
 — vẫn đọc từ `.env.app`/`.env.monitoring` lúc container chạy.
@@ -1313,17 +1352,18 @@ docker login
 sudo mkdir -p /opt/ecommerce && cd /opt/ecommerce
 docker network create ecommerce-shared
 
-# Dán nội dung docker-compose.app.yml + .env.app (lấy từ repo, điền mật khẩu thật)
-# Dán nội dung docker-compose.monitoring.yml + .env.monitoring (điền Grafana/Telegram/mail)
+# Chép 2 thư mục webapp/ và monitoring/ của repo lên đây (chỉ cần compose + file mẫu .env trong mỗi thư mục)
+# webapp/.env.app        <- từ webapp/.env.app.example, điền mật khẩu thật
+# monitoring/.env.monitoring <- từ monitoring/.env.monitoring.example, điền Grafana/Telegram/mail/Bedrock
 
-docker compose -f docker-compose.app.yml --env-file .env.app pull
-docker compose -f docker-compose.app.yml --env-file .env.app up -d
+docker compose -f webapp/docker-compose.app.yml --env-file webapp/.env.app pull
+docker compose -f webapp/docker-compose.app.yml --env-file webapp/.env.app up -d
 
-docker compose -f docker-compose.monitoring.yml --env-file .env.monitoring pull
-docker compose -f docker-compose.monitoring.yml --env-file .env.monitoring up -d
+docker compose -f monitoring/docker-compose.monitoring.yml --env-file monitoring/.env.monitoring pull
+docker compose -f monitoring/docker-compose.monitoring.yml --env-file monitoring/.env.monitoring up -d
 
-# (Tuỳ chọn) AI: điền khoá Bedrock + AI_WEBHOOK_URL trong .env.monitoring (mục 7.19-7.20)
-docker compose -f docker-compose.monitoring.yml --env-file .env.monitoring --profile ai up -d holmes-bridge
+# (Tuỳ chọn) AI: điền khoá Bedrock + AI_WEBHOOK_URL (+ REMEDIATOR_URL) trong monitoring/.env.monitoring (mục 7.19-7.20, README2.md)
+docker compose -f monitoring/docker-compose.monitoring.yml --env-file monitoring/.env.monitoring --profile ai up -d
 ```
 
 **Bước 3 — Kiểm tra**:

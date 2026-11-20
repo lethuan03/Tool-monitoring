@@ -1,0 +1,49 @@
+{
+  "_doc": "Policy RIÊNG CHO SANDBOX: chỉ cho đụng 2 container đồ chơi ecommerce-sbx-*. Cùng cấu trúc với ai-remediation/remediator/policy.json. Tên khác hẳn container thật để không bao giờ đụng nhầm stack thật.",
+  "containers_allowed": [
+    "ecommerce-sbx-backend",
+    "ecommerce-sbx-nginx"
+  ],
+  "containers_forbidden": [
+    "ecommerce-sbx-db",
+    "sbx-holmes-bridge",
+    "sbx-remediator",
+    "sbx-docker-proxy",
+    "sbx-mock"
+  ],
+  "alternatives": {
+    "ecommerce-sbx-db": [
+      {"action_id": "logs_tail", "container": "ecommerce-sbx-backend", "why": "DB bị cấm; xem log backend"},
+      {"action_id": "restart_container", "container": "ecommerce-sbx-nginx", "why": "Gợi ý thay thế an toàn (sandbox)"}
+    ],
+    "_default": [
+      {"action_id": "logs_tail", "container": "{container}", "why": "Xem log trước (chỉ đọc)"},
+      {"action_id": "logs_tail", "container": "ecommerce-sbx-backend", "why": "Xem log backend (chỉ đọc)"}
+    ]
+  },
+  "actions": {
+    "restart_container": {
+      "description": "Khởi động lại 1 container (docker restart)",
+      "docker": {"method": "POST", "path": "/containers/{container}/restart", "query": {"t": "2"}},
+      "mutating": true,
+      "cooldown_seconds": 300,
+      "max_per_hour": 3
+    },
+    "start_container": {
+      "description": "Bật lại 1 container đã dừng (docker start)",
+      "docker": {"method": "POST", "path": "/containers/{container}/start", "query": {}},
+      "mutating": true,
+      "cooldown_seconds": 120,
+      "max_per_hour": 3
+    },
+    "logs_tail": {
+      "description": "Xem 100 dòng log cuối của 1 container (chỉ đọc)",
+      "docker": {"method": "GET", "path": "/containers/{container}/logs", "query": {"stdout": "1", "stderr": "1", "tail": "100"}},
+      "mutating": false,
+      "cooldown_seconds": 0,
+      "max_per_hour": 10
+    }
+  },
+  "approval_ttl_seconds": 600,
+  "max_pending": 10
+}

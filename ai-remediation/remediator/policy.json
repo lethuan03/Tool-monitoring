@@ -1,0 +1,60 @@
+{
+  "_doc": "FILE RULE: nguồn sự thật duy nhất về lệnh nào được chạy và container nào được đụng. Đóng gói vào image, sửa xong phải build lại image. Container nằm trong containers_forbidden LUÔN bị từ chối, kể cả khi có trong containers_allowed. Action nào không khai báo ở đây thì bị từ chối.",
+  "containers_allowed": [
+    "ecommerce-backend",
+    "ecommerce-frontend",
+    "ecommerce-nginx",
+    "ecommerce-nginx-exporter",
+    "ecommerce-mysqld-exporter",
+    "ecommerce-node-exporter",
+    "ecommerce-alloy",
+    "ecommerce-prometheus",
+    "ecommerce-loki",
+    "ecommerce-grafana",
+    "ecommerce-alertmanager"
+  ],
+  "containers_forbidden": [
+    "ecommerce-db",
+    "ecommerce-holmes-bridge",
+    "ecommerce-remediator",
+    "ecommerce-docker-proxy"
+  ],
+  "actions": {
+    "restart_container": {
+      "description": "Khởi động lại 1 container (docker restart)",
+      "docker": {"method": "POST", "path": "/containers/{container}/restart", "query": {"t": "10"}},
+      "mutating": true,
+      "cooldown_seconds": 300,
+      "max_per_hour": 3
+    },
+    "start_container": {
+      "description": "Bật lại 1 container đã dừng (docker start)",
+      "allow_on_forbidden": ["ecommerce-db"],
+      "docker": {"method": "POST", "path": "/containers/{container}/start", "query": {}},
+      "mutating": true,
+      "cooldown_seconds": 120,
+      "max_per_hour": 3
+    },
+    "logs_tail": {
+      "description": "Xem 100 dòng log cuối của 1 container (chỉ đọc)",
+      "docker": {"method": "GET", "path": "/containers/{container}/logs", "query": {"stdout": "1", "stderr": "1", "tail": "100"}},
+      "mutating": false,
+      "cooldown_seconds": 0,
+      "max_per_hour": 10
+    }
+  },
+  "_alternatives_doc": "Lệnh GỢI Ý khi đề xuất của AI bị chặn. Khoá = container bị chặn, '_default' = mọi trường hợp còn lại; '{container}' = container AI đề xuất. Mỗi gợi ý vẫn phải qua kiểm tra policy (không nới luật) và vẫn cần người bấm Duyệt.",
+  "alternatives": {
+    "ecommerce-db": [
+      {"action_id": "start_container", "container": "ecommerce-db", "why": "Chỉ bật lại DB đã dừng (restart/xoá/log vẫn bị cấm)"},
+      {"action_id": "logs_tail", "container": "ecommerce-backend", "why": "DB bị cấm đụng tới; xem log backend để biết lỗi kết nối DB"},
+      {"action_id": "restart_container", "container": "ecommerce-backend", "why": "Backend nối lại DB sau khi DB phục hồi"}
+    ],
+    "_default": [
+      {"action_id": "logs_tail", "container": "{container}", "why": "Xem log trước (chỉ đọc, an toàn)"},
+      {"action_id": "logs_tail", "container": "ecommerce-backend", "why": "Xem log backend (chỉ đọc)"}
+    ]
+  },
+  "approval_ttl_seconds": 600,
+  "max_pending": 10
+}

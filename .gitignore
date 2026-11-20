@@ -8,3 +8,7 @@ node_modules/
 
 # Script / user data trên EC2 chứa sẵn mật khẩu thật — không commit
 ec2/
+
+# Python
+__pycache__/
+*.pyc

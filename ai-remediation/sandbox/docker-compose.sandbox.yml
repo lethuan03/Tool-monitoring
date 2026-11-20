@@ -1,0 +1,122 @@
+# ============================================================================
+# SANDBOX test cục bộ cho "AI đề xuất lệnh sửa lỗi" (xem README2.md, mục Sandbox).
+#
+# - Chạy THẬT: holmes-bridge (bridge.py thật), remediator (code thật), docker-proxy (thật).
+# - Giả (mock): Telegram + Prometheus (sbx-mock), "AI" (mock_holmes.py, không Bedrock).
+# - Nạn nhân: 3 container đồ chơi ecommerce-sbx-* (alpine sleep). Tên KHÁC container thật.
+# - Không AWS, không internet ngoài việc pull image lần đầu, không đọc .env, không secret thật.
+#
+# Dùng script:   python sandbox/run_sandbox.py       (từ thư mục gốc repo)
+# Thủ công:      docker compose -p ai-sandbox -f sandbox/docker-compose.sandbox.yml up -d --build
+#                docker compose -p ai-sandbox -f sandbox/docker-compose.sandbox.yml down -v
+# ============================================================================
+name: ai-sandbox
+
+x-victim: &victim
+  image: alpine:3.20
+  command: ["sleep", "infinity"]
+  networks: [sbxnet]
+  restart: "no"
+
+services:
+  # ---- 3 container nạn nhân ----
+  ecommerce-sbx-backend:
+    <<: *victim
+    container_name: ecommerce-sbx-backend
+  ecommerce-sbx-nginx:
+    <<: *victim
+    container_name: ecommerce-sbx-nginx
+  ecommerce-sbx-db:            # bị policy CẤM: dùng để kiểm tra AI đòi restart DB thì bị chặn
+    <<: *victim
+    container_name: ecommerce-sbx-db
+
+  # ---- mock Telegram + Prometheus ----
+  mock:
+    build: {context: .., dockerfile: sandbox/Dockerfile.mock}
+    container_name: sbx-mock
+    ports: ["127.0.0.1:18081:8081"]
+    networks: [sbxnet]
+
+  # ---- docker-proxy: y hệt production (chỉ API container, mạng nội bộ) ----
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0
+    container_name: sbx-docker-proxy
+    environment:
+      - CONTAINERS=1
+      - POST=1
+      - ALLOW_START=1
+      - ALLOW_RESTARTS=1
+      - ALLOW_STOP=0
+      - EXEC=0
+      - IMAGES=0
+      - VOLUMES=0
+      - NETWORKS=0
+      - SERVICES=0
+      - TASKS=0
+      - SWARM=0
+      - SECRETS=0
+      - CONFIGS=0
+      - BUILD=0
+      - COMMIT=0
+      - AUTH=0
+      - PLUGINS=0
+      - SYSTEM=0
+      - INFO=0
+      - EVENTS=0
+      - DISTRIBUTION=0
+      - NODES=0
+      - SESSION=0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [dockernet]
+
+  # ---- remediator thật, dùng policy sandbox ----
+  remediator:
+    build: {context: ../remediator}
+    container_name: sbx-remediator
+    environment:
+      - POLICY_FILE=/app/policy.sandbox.json
+      - TELEGRAM_BOT_TOKEN=FAKE_SANDBOX_TOKEN
+      - TELEGRAM_CHAT_ID=111
+      - TELEGRAM_API_URL=http://mock:8081
+      - PROMETHEUS_URL=http://mock:8081
+      - DOCKER_URL=http://docker-proxy:2375
+      - REMEDIATION_MODE=${SBX_MODE:-dry-run}
+      - REMEDIATION_ENABLED=${SBX_ENABLED:-true}
+      - REMEDIATOR_SECRET=sandbox-secret-not-real
+      - REMEDIATOR_APPROVER_IDS=999
+      - REMEDIATOR_POST_CHECK_DELAY_SECONDS=1
+      - BRIDGE_URL=http://holmes-bridge:8080
+      - AI_MAX_ROUNDS=3
+    volumes:
+      - ./policy.sandbox.json:/app/policy.sandbox.json:ro
+    depends_on: [docker-proxy, mock]
+    networks: [sbxnet, dockernet]
+
+  # ---- bridge thật + AI giả ----
+  holmes-bridge:
+    build: {context: .., dockerfile: sandbox/Dockerfile.bridge}
+    container_name: sbx-holmes-bridge
+    ports: ["127.0.0.1:18080:8080"]
+    environment:
+      - HOLMES_CMD=python /app/mock_holmes.py
+      - TELEGRAM_BOT_TOKEN=FAKE_SANDBOX_TOKEN
+      - TELEGRAM_CHAT_ID=111
+      - TELEGRAM_API_URL=http://mock:8081
+      - PROMETHEUS_URL=http://mock:8081
+      - REMEDIATOR_URL=http://remediator:8090
+      - AI_MAX_ROUNDS=3
+      - AI_MAX_PER_HOUR=100
+      - AI_CONFIRM_DELAY_SECONDS=1
+      # Giá trị GIẢ để vượt qua bước kiểm tra "có khoá Bedrock"; mock_holmes không dùng tới
+      - AWS_REGION_NAME=sandbox-fake-region
+      - AWS_BEARER_TOKEN_BEDROCK=sandbox-fake-not-a-real-key
+    depends_on: [remediator, mock]
+    networks: [sbxnet]
+
+networks:
+  sbxnet:
+    driver: bridge
+  dockernet:
+    driver: bridge
+    internal: true

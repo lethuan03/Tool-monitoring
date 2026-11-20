@@ -22,18 +22,20 @@ $ErrorActionPreference = "Continue"
 
 # (name trong Docker Hub, build context)
 $images = @(
-    @{ Name = "ecommerce-backend";      Context = "backend" },
-    @{ Name = "ecommerce-frontend";     Context = "frontend" },
-    @{ Name = "ecommerce-nginx";        Context = "nginx" },
-    @{ Name = "ecommerce-db";           Context = "mysql" },
-    @{ Name = "ecommerce-alloy";        Context = "alloy" },
-    @{ Name = "ecommerce-prometheus";   Context = "prometheus" },
-    @{ Name = "ecommerce-grafana";      Context = "grafana" },
-    @{ Name = "ecommerce-loki";         Context = "loki" },
-    @{ Name = "ecommerce-alertmanager"; Context = "alertmanager" },
-    @{ Name = "ecommerce-holmes";       Context = "holmes" },
+    @{ Name = "ecommerce-backend";      Context = "webapp/backend" },
+    @{ Name = "ecommerce-frontend";     Context = "webapp/frontend" },
+    @{ Name = "ecommerce-nginx";        Context = "webapp/nginx" },
+    @{ Name = "ecommerce-db";           Context = "webapp/mysql" },
+    @{ Name = "ecommerce-alloy";        Context = "monitoring/alloy" },
+    @{ Name = "ecommerce-prometheus";   Context = "monitoring/prometheus" },
+    @{ Name = "ecommerce-grafana";      Context = "monitoring/grafana" },
+    @{ Name = "ecommerce-loki";         Context = "monitoring/loki" },
+    @{ Name = "ecommerce-alertmanager"; Context = "monitoring/alertmanager" },
+    @{ Name = "ecommerce-holmes";       Context = "monitoring/holmes" },
     # Phải đứng SAU ecommerce-holmes: Dockerfile của bridge dựng trên image đó
-    @{ Name = "ecommerce-holmes-bridge"; Context = "holmes-bridge" }
+    @{ Name = "ecommerce-holmes-bridge"; Context = "ai-remediation/holmes-bridge" },
+    # Thực thi lệnh sửa lỗi đã được người duyệt (xem README2.md)
+    @{ Name = "ecommerce-remediator"; Context = "ai-remediation/remediator" }
 )
 
 foreach ($img in $images) {

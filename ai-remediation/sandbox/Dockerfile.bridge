@@ -1,0 +1,8 @@
+# Sandbox: chạy ĐÚNG holmes-bridge/bridge.py + runbooks thật, nhưng thay `holmes` bằng mock
+# (không kéo image holmesgpt nặng, không Bedrock). Build context = thư mục gốc repo.
+FROM python:3.12-slim
+COPY holmes-bridge/bridge.py /app/bridge.py
+COPY holmes-bridge/runbooks /app/runbooks
+COPY sandbox/mock/mock_holmes.py /app/mock_holmes.py
+EXPOSE 8080
+ENTRYPOINT ["python", "-u", "/app/bridge.py"]
