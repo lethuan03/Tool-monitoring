@@ -1277,6 +1277,8 @@ Phần mở rộng (xem [README2.md](ai-remediation/README2.md)): runbook markdo
 
 - **Vòng lặp AI ↔ người duyệt**: lệnh chạy xong mà chưa ổn thì kết quả quay lại AI để đề xuất bước tiếp (tối đa `AI_MAX_ROUNDS` vòng, mỗi vòng = 1 lượt Bedrock); thoát bằng nút ⏹ hoặc `/stop`.
 - **Lệnh thay thế** khi đề xuất bị chặn (bảng `alternatives` trong policy) và ngoại lệ hẹp cho phép AI **bật lại** `ecommerce-db` đã dừng.
+- **Cách 2: AI gọi công cụ** (`read_status`, `propose_fix`) qua remediator `/tool/*`; AI vẫn không chạy được lệnh, mọi thứ qua `policy.json` và nút Duyệt; bản đồ hệ thống `knowledge/system.md` + tóm tắt phân tích giữa các vòng; hiểu câu nói tự nhiên trên Telegram (xem README2 mục 1c).
+- **Phiên trò chuyện với AI (`/ai`)**: nói tự nhiên, AI nhớ ngữ cảnh, tự biết "container của backend" là container nào và đề xuất lệnh kèm nút Duyệt; tự đóng sau 15 phút (xem README2 mục 1c).
 - **Gõ lệnh trong chat Telegram**: `/restart|/start|/logs <container>` hoặc `docker restart backend`; lệnh nằm ngoài kho lệnh hay bị rule chặn thì báo "⛔ KHÔNG ĐƯỢC PHÉP" và không chạy gì.
 
 Đã kiểm thử bằng unit test (65 test remediator, 14 test bridge) và sandbox cục bộ (62 kiểm tra); đã triển khai và gọi Bedrock thật trên Docker local. **Chưa chạy trên EC2.**

@@ -35,7 +35,9 @@ $images = @(
     # Phải đứng SAU ecommerce-holmes: Dockerfile của bridge dựng trên image đó
     @{ Name = "ecommerce-holmes-bridge"; Context = "ai-remediation/holmes-bridge" },
     # Thực thi lệnh sửa lỗi đã được người duyệt (xem README2.md)
-    @{ Name = "ecommerce-remediator"; Context = "ai-remediation/remediator" }
+    @{ Name = "ecommerce-remediator"; Context = "ai-remediation/remediator" },
+    # Proxy allowlist tới Docker API cho remediator (thay tecnativa/docker-socket-proxy)
+    @{ Name = "ecommerce-docker-proxy"; Context = "ai-remediation/docker-proxy" }
 )
 
 foreach ($img in $images) {

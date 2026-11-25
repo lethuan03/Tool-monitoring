@@ -37,10 +37,28 @@
     },
     "logs_tail": {
       "description": "Xem 100 dòng log cuối của 1 container (chỉ đọc)",
+      "approval": "none",
       "docker": {"method": "GET", "path": "/containers/{container}/logs", "query": {"stdout": "1", "stderr": "1", "tail": "100"}},
       "mutating": false,
       "cooldown_seconds": 0,
       "max_per_hour": 10
+    },
+    "inspect_container": {
+      "description": "Xem trạng thái 1 container: chạy/dừng, mã thoát, OOM, health, số lần restart (chỉ đọc; chỉ trả các trường an toàn, KHÔNG có biến môi trường)",
+      "approval": "none",
+      "allow_on_forbidden": ["ecommerce-db"],
+      "docker": {"method": "GET", "path": "/containers/{container}/json", "query": {}},
+      "mutating": false,
+      "cooldown_seconds": 0,
+      "max_per_hour": 20
+    },
+    "container_stats": {
+      "description": "Xem CPU/RAM hiện tại của 1 container (chỉ đọc)",
+      "approval": "none",
+      "docker": {"method": "GET", "path": "/containers/{container}/stats", "query": {"stream": "false"}},
+      "mutating": false,
+      "cooldown_seconds": 0,
+      "max_per_hour": 20
     }
   },
   "_alternatives_doc": "Lệnh GỢI Ý khi đề xuất của AI bị chặn. Khoá = container bị chặn, '_default' = mọi trường hợp còn lại; '{container}' = container AI đề xuất. Mỗi gợi ý vẫn phải qua kiểm tra policy (không nới luật) và vẫn cần người bấm Duyệt.",

@@ -22,6 +22,7 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 COMPOSE = ["docker", "compose", "-p", "ai-sandbox", "-f", os.path.join(ROOT, "sandbox", "docker-compose.sandbox.yml")]
 MOCK, BRIDGE = "http://127.0.0.1:18081", "http://127.0.0.1:18080"
+SBX_TOKEN = "sandbox-tool-token-not-real-0123456789abcdef"      # giống REMEDIATOR_TOOL_TOKEN trong docker-compose.sandbox.yml
 BACKEND, NGINX, DB = "ecommerce-sbx-backend", "ecommerce-sbx-nginx", "ecommerce-sbx-db"
 
 results = []
@@ -37,8 +38,11 @@ def sh(args, env=None, check=True):
 
 
 def http(method, url, body=None):
+    headers = {"Content-Type": "application/json"}
+    if url.startswith(BRIDGE):
+        headers["Authorization"] = f"Bearer {SBX_TOKEN}"        # bridge bắt token cho /alert (giống Alertmanager thật)
     req = urllib.request.Request(url, data=json.dumps(body).encode() if body is not None else None, method=method,
-                                 headers={"Content-Type": "application/json"})
+                                 headers=headers)
     with urllib.request.urlopen(req, timeout=20) as r:
         raw = r.read().decode("utf-8", errors="replace")
     try:
@@ -135,16 +139,22 @@ def propose_flow(fp, action, container):
 
 
 # ------------------------------------------------------------------ kịch bản
+def audit_find(event, **kw):
+    return [e for e in audit() if e["event"] == event and all(e.get(k) == v for k, v in kw.items())]
+
+
 def phase_dry_run():
-    print("\n=== PHA 1: DRY-RUN (duyệt xong chỉ ghi nhận, KHÔNG chạy) ===")
+    print("\n=== PHA 1: DRY-RUN (duyệt xong chỉ ghi nhận, KHÔNG chạy) — AI (giả) gọi CÔNG CỤ thật ===")
     before = started_at(BACKEND)
 
-    print("- A1: AI đề xuất restart backend -> Telegram có tin phân tích + tin xin duyệt")
+    print("- A1: AI đề xuất restart backend qua công cụ propose_fix -> Telegram có tin phân tích + tin xin duyệt")
     analysis, proposal = propose_flow("a1", "restart_container", BACKEND)
     check("A1 có tin phân tích", analysis)
     check("A1 prompt đã chèn runbook (mock AI báo CÓ)", analysis and "runbook: CÓ" in analysis["text"])
-    check("A1 bridge đã yêu cầu dòng hành động", analysis and "dòng hành động: CÓ" in analysis["text"])
-    check("A1 dòng 'HÀNH ĐỘNG ĐỀ XUẤT' đã bị bóc khỏi tin phân tích", analysis and "HÀNH ĐỘNG ĐỀ XUẤT" not in analysis["text"])
+    check("A1 bridge chỉ dẫn AI dùng công cụ (cách 2)", analysis and "công cụ: CÓ" in analysis["text"])
+    check("A1 prompt đã chèn bản đồ hệ thống", analysis and "bản đồ hệ thống: CÓ" in analysis["text"])
+    check("A1 không có dòng 'HÀNH ĐỘNG ĐỀ XUẤT' trong tin phân tích", analysis and "HÀNH ĐỘNG ĐỀ XUẤT" not in analysis["text"])
+    check("A1 công cụ trả 'queued'", analysis and "propose_fix trả: queued" in analysis["text"])
     check("A1 có tin xin duyệt kèm 3 nút (Duyệt / Từ chối / Dừng)", proposal and len(proposal["buttons"]) == 3)
     check("A1 tin xin duyệt nêu đúng container và DRY-RUN",
           proposal and BACKEND in proposal["text"] and "DRY-RUN" in proposal["text"])
@@ -156,16 +166,18 @@ def phase_dry_run():
         check("A2 audit có approved_dry_run, executed=false",
               any(e["event"] == "approved_dry_run" and e.get("fingerprint") == "a1" and e.get("executed") is False for e in audit()))
         check("A2 audit ghi người duyệt = 999", any(e.get("approver") == "999" for e in audit() if e["event"] == "approved_dry_run"))
+        check("A2 audit có tool_propose của phiên AI", audit_find("tool_propose", fingerprint="a1"))
 
-    print("- A3: AI đòi restart DB (container bị CẤM) -> policy chặn")
+    print("- A3: AI đòi restart DB (container bị CẤM) -> policy chặn, AI được báo lý do + gợi ý NGAY trong phiên")
     db_before = started_at(DB)
     analysis, proposal = propose_flow("a3", "restart_container", DB)
     blocked = wait_for(lambda: msgs("Policy chặn"), 20)
     check("A3 policy chặn, báo Telegram", blocked)
+    check("A3 tin báo nói rõ AI đã nhận lý do (không chìa nút chạy lệnh khác)",
+          blocked and "AI đã được báo lý do" in blocked[0]["text"] and not blocked[0]["buttons"])
     check("A3 KHÔNG có nút duyệt cho DB", not proposal)
-    alt = next(iter(msgs("Lệnh thay thế")), None)
-    check("A3 báo kèm LỆNH THAY THẾ có nút duyệt riêng", alt and len(alt["buttons"]) >= 2)
-    check("A3 không gợi ý nào đụng tới DB", alt and all(DB not in b["text"] for b in alt["buttons"]))
+    check("A3 AI (mock) nhận 'denied' kèm 2 gợi ý thay thế ngay trong phiên",
+          analysis and "propose_fix trả: denied; gợi ý thay thế: 2" in analysis["text"])
     check("A3 audit denied", wait_for(lambda: any(e["event"] == "denied" and e.get("container") == DB for e in audit()), 10))
     check("A3 DB không bị đụng", started_at(DB) == db_before)
 
@@ -204,24 +216,25 @@ def phase_execute():
         check("B1 audit executed: success, đúng lệnh, đúng người duyệt",
               ex and ex[0].get("success") and ex[0]["command"] == f"POST /containers/{BACKEND}/restart" and ex[0]["approver"] == "999")
 
-    print("- B2: đề xuất restart lại ngay -> chặn bởi cooldown")
+    print("- B2: đề xuất restart lại ngay -> chặn bởi cooldown, AI được báo 'rate_limited'")
     before2 = started_at(BACKEND)
     analysis, proposal = propose_flow("b2", "restart_container", BACKEND)
     check("B2 không có nút duyệt (đang cooldown)", analysis and not proposal)
+    check("B2 AI (mock) nhận 'rate_limited' từ công cụ", analysis and "propose_fix trả: rate_limited" in analysis["text"])
     check("B2 audit denied do cooldown",
           wait_for(lambda: any(e["event"] == "denied" and e.get("fingerprint") == "b2" and "chờ" in e.get("why", "") for e in audit()), 10))
     check("B2 container không bị restart lần 2", started_at(BACKEND) == before2)
 
-    print("- B3: logs_tail (chỉ đọc) -> trả log lên Telegram")
-    analysis, proposal = propose_flow("b3", "logs_tail", NGINX)
-    check("B3 có tin xin duyệt", proposal)
-    if proposal:
-        nginx_before = started_at(NGINX)
-        click(proposal["message_id"], 0)
-        check("B3 Telegram trả phần 'Log cuối của ...'", wait_for(lambda: msgs("Log cuối của"), 30))
-        check("B3 không làm restart container", started_at(NGINX) == nginx_before)
-        check("B3 log được gửi lại cho AI; AI (mock) không còn lệnh -> vòng kết thúc",
-              wait_for(lambda: msgs("không còn lệnh an toàn"), 40))
+    print("- B3: logs_tail là hành động CHỈ ĐỌC -> AI đọc thẳng qua công cụ (không cần duyệt); người gõ /logs cũng chạy ngay")
+    http("POST", MOCK + "/_reset", {})
+    nginx_before = started_at(NGINX)
+    fire("b3", "logs_tail", NGINX)
+    check("B3 AI đọc log trực tiếp: audit tool_read", wait_for(lambda: audit_find("tool_read", fingerprint="b3"), 30))
+    check("B3 không có tin xin duyệt cho việc đọc log", not wait_for(lambda: next(iter(msgs("ĐỀ XUẤT LỆNH")), None), 3))
+    check("B3 không làm restart container", started_at(NGINX) == nginx_before)
+    say("/logs ecommerce-sbx-nginx")
+    check("B3 người gõ /logs -> Telegram trả ngay 'Log cuối của ...' (chỉ đọc, không cần nút Duyệt)",
+          wait_for(lambda: msgs("Log cuối của"), 30) and not msgs("LỆNH BẠN VỪA GÕ"))
 
     print("- B4: DB vẫn bị cấm ở chế độ execute")
     db_before = started_at(DB)
@@ -233,12 +246,16 @@ def phase_execute():
     victim = sh(["docker", "ps", "--format", "{{.Names}}", "--filter", "name=freshmart"], check=False).splitlines()
     target = victim[0] if victim else "some-other-container"
     t_before = started_at(target) if victim else ""
-    code = sh(["docker", "exec", "sbx-holmes-bridge", "python", "-c",
-               "import urllib.request,urllib.error,json,sys\n"
-               "req=urllib.request.Request('http://remediator:8090/propose',data=json.dumps({'alert':'x','fingerprint':'b5','action_id':'restart_container','container':sys.argv[1],'reason':'t'}).encode())\n"
-               "try:\n print(urllib.request.urlopen(req,timeout=10).status)\n"
-               "except urllib.error.HTTPError as e:\n print(e.code)", target])
-    check(f"B5 container ngoài danh sách '{target}' bị từ chối (HTTP 403)", code.strip() == "403", code)
+    probe = ("import urllib.request,urllib.error,json,sys\n"
+             "h={'Content-Type':'application/json'}\n"
+             "if sys.argv[2]: h['Authorization']='Bearer '+sys.argv[2]\n"
+             "req=urllib.request.Request('http://remediator:8090/propose',data=json.dumps({'alert':'x','fingerprint':'b5','action_id':'restart_container','container':sys.argv[1],'reason':'t'}).encode(),headers=h)\n"
+             "try:\n print(urllib.request.urlopen(req,timeout=10).status)\n"
+             "except urllib.error.HTTPError as e:\n print(e.code)")
+    code = sh(["docker", "exec", "sbx-holmes-bridge", "python", "-c", probe, target, ""])
+    check("B5 gọi /propose KHÔNG có token -> 401 (container khác trong mạng không giả đề xuất được)", code.strip() == "401", code)
+    code = sh(["docker", "exec", "sbx-holmes-bridge", "python", "-c", probe, target, SBX_TOKEN])
+    check(f"B5 có token nhưng container ngoài danh sách '{target}' -> bị từ chối (HTTP 403)", code.strip() == "403", code)
     if victim:
         check("B5 container của project khác không bị đụng", started_at(target) == t_before)
 
@@ -251,6 +268,24 @@ def phase_execute():
                 " except urllib.error.HTTPError as e: return e.code\n"
                 "print(code('GET','/images/json'),code('GET','/volumes'),code('GET','/info'),code('POST','/exec/abc/start',b'{}'))"])
     check("B6 /images, /volumes, /info, /exec/<id>/start đều bị proxy chặn (403)", probe.split() == ["403"] * 4, probe)
+    w_before = started_at("ecommerce-sbx-worker1")
+    probe2 = sh(["docker", "exec", "sbx-remediator", "python", "-c",
+                 "import urllib.request,urllib.error\n"
+                 "def code(m,u,b=None):\n"
+                 " r=urllib.request.Request('http://docker-proxy:2375'+u,data=b,method=m)\n"
+                 " try: return urllib.request.urlopen(r,timeout=10).status\n"
+                 " except urllib.error.HTTPError as e: return e.code\n"
+                 "print(code('DELETE','/containers/ecommerce-sbx-worker1?force=1'),"
+                 "code('PUT','/containers/ecommerce-sbx-worker1/archive?path=/tmp',b'x'),"
+                 "code('POST','/containers/ecommerce-sbx-worker1/stop'),"
+                 "code('POST','/containers/ecommerce-sbx-worker1/kill'),"
+                 "code('POST','/containers/ecommerce-sbx-db/restart'),"
+                 "code('POST','/containers/ecommerce-nonexistent-xyz/restart'),"
+                 "code('GET','/containers/ecommerce-sbx-backend/logs?follow=1&stdout=1'),"
+                 "code('GET','/containers/sbx-remediator/json'))"])
+    check("B6 proxy allowlist chặn XOÁ, ghi file, stop, kill, restart DB, container ngoài sandbox, logs follow, đọc container hệ thống",
+          probe2.split() == ["403"] * 8, probe2)
+    check("B6 container sandbox không bị xoá/dừng sau khi dò", started_at("ecommerce-sbx-worker1") == w_before)
 
     # Thăm dò lỗ hổng đã biết: proxy bật CONTAINERS+POST nên cho TẠO container. Tạo xong xoá ngay.
     gap = sh(["docker", "exec", "sbx-remediator", "python", "-c",
@@ -269,71 +304,71 @@ def phase_execute():
 
 
 def phase_loop():
-    print("\n=== PHA 3: VÒNG LẶP AI <-> NGƯỜI DUYỆT (chạy thật, chỉ container sandbox) ===")
+    print("\n=== PHA 3: CÔNG CỤ, VÒNG LẶP, GÕ LỆNH VÀ CÂU NÓI TỰ NHIÊN (chạy thật, chỉ container sandbox) ===")
+    W1, W2, W3 = "ecommerce-sbx-worker1", "ecommerce-sbx-worker2", "ecommerce-sbx-worker3"
 
-    print("- C1: AI đòi restart DB (bị cấm) -> người bấm 1 lệnh THAY THẾ -> lệnh đó chạy thật")
+    print("- C1: AI đòi restart DB (bị cấm) -> được báo + gợi ý ngay trong phiên -> tự chọn lại -> nút Duyệt cho lệnh thay thế")
     db_before = started_at(DB)
     http("POST", MOCK + "/_reset", {})
-    fire("c1", "restart_container", DB)
-    alt = wait_for(lambda: next(iter(msgs("Lệnh thay thế")), None), 40)
-    check("C1 có tin 'Policy chặn' kèm lệnh thay thế", alt)
+    fire("c1", "restart_container", DB, {"sbx_retry": "1"})
+    check("C1 có tin 'Policy chặn'", wait_for(lambda: msgs("Policy chặn"), 40))
+    alt = wait_for(lambda: next((m for m in msgs("ĐỀ XUẤT LỆNH") if NGINX in m["text"] and "restart_container" in m["text"]), None), 30)
+    check("C1 AI chọn lại đúng gợi ý (restart nginx) và có nút Duyệt", alt and len(alt["buttons"]) == 3)
+    check("C1 audit: denied rồi tool_propose queued cho lệnh thay thế",
+          audit_find("denied", fingerprint="c1") and audit_find("tool_propose", fingerprint="c1", result="queued"))
     if alt:
-        btn = next((i for i, b in enumerate(alt["buttons"]) if "logs_tail" in b["text"]), None)
-        check("C1 có nút gợi ý logs_tail", btn is not None)
-        if btn is not None:
-            click(alt["message_id"], btn)
-            check("C1 bấm gợi ý -> lệnh thay thế chạy thật (trả log backend)", wait_for(lambda: msgs("Log cuối của"), 30))
-            check("C1 audit: alternatives_offered + executed logs_tail",
-                  audit_has("alternatives_offered", "c1") and
-                  any(e["event"] == "executed" and e.get("fingerprint") == "c1" and e.get("action_id") == "logs_tail" for e in audit()))
+        click(alt["message_id"], 1)       # từ chối: không để lệnh chạy (tránh dính cooldown cho kịch bản sau)
+        check("C1 người từ chối lệnh thay thế -> không chạy", wait_for(lambda: msgs("Đã từ chối"), 15))
     check("C1 DB không bị đụng", started_at(DB) == db_before)
 
-    print("- C2: AI viết lệnh sai dạng (không phải action_id + container) -> policy chặn, KHÔNG im lặng")
+    print("- C2: AI gọi công cụ với tên container sai dạng -> script công cụ chặn trước khi gọi remediator")
     http("POST", MOCK + "/_reset", {})
     fire("c2", "restart_container", "docker-exec-bash")
-    check("C2 admin được báo 'Policy chặn' kèm đề xuất thay thế",
-          wait_for(lambda: next((m for m in msgs("Policy chặn") if "docker-exec-bash" in m["text"] and m["buttons"]), None), 40))
+    an = wait_for(lambda: next(iter(msgs("AI PHÂN TÍCH")), None), 40)
+    check("C2 AI nhận 'denied' từ công cụ", an and "propose_fix trả: denied" in an["text"])
+    check("C2 không có tin xin duyệt, không có đề xuất nào trong audit",
+          not msgs("ĐỀ XUẤT LỆNH") and not audit_find("proposed", fingerprint="c2") and not audit_find("tool_propose", fingerprint="c2"))
 
-    print("- C3: vòng lặp 3 vòng: restart nginx (chưa ổn) -> AI xem kết quả -> logs_tail -> AI hết cách")
+    print("- C3: vòng lặp: restart nginx (Prometheus giả: backend vẫn chết) -> AI vòng 2 nhận tóm tắt + lịch sử + bản đồ; lặp lại lệnh cũ thì được báo duplicate")
     http("POST", MOCK + "/_reset", {})
-    http("POST", MOCK + "/_down", {"jobs": ["backend"]})            # Prometheus giả: backend vẫn chết sau lệnh
+    http("POST", MOCK + "/_down", {"jobs": ["backend"]})
     nginx_before = started_at(NGINX)
-    fire("c3", "restart_container", NGINX, {"sbx_action2": "logs_tail"})
+    fire("c3", "restart_container", NGINX, {"sbx_action2": "restart_container", "sbx_container2": NGINX})
     p1 = wait_for(lambda: next((m for m in msgs("ĐỀ XUẤT LỆNH") if "vòng 1/3" in m["text"]), None), 40)
     check("C3 vòng 1: có đề xuất ghi 'vòng 1/3'", p1)
     if p1:
         click(p1["message_id"], 0)
         check("C3 nginx đã restart thật", wait_for(lambda: started_at(NGINX) != nginx_before, 30))
         check("C3 báo 'còn chưa trả lời: backend'", wait_for(lambda: msgs("còn chưa trả lời: backend"), 30))
-        r2 = wait_for(lambda: next(iter(msgs("AI TIẾP TỤC (vòng 2/3)")), None), 40)
-        check("C3 AI được gọi lại ở vòng 2 và nhận được LỊCH SỬ lệnh vừa chạy", r2 and "lịch sử lệnh: CÓ" in r2["text"])
-        p2 = wait_for(lambda: next((m for m in msgs("ĐỀ XUẤT LỆNH") if "vòng 2/3" in m["text"]), None), 20)
-        check("C3 vòng 2: AI đề xuất lệnh mới (logs_tail), lại hỏi duyệt", p2 and "logs_tail" in p2["text"])
-        if p2:
-            http("POST", MOCK + "/_down", {"jobs": []})
-            click(p2["message_id"], 0)
-            check("C3 vòng 2: lệnh chạy, trả log", wait_for(lambda: msgs("Log cuối của"), 30))
-            check("C3 vòng 3: AI không còn lệnh an toàn -> vòng kết thúc", wait_for(lambda: msgs("không còn lệnh an toàn"), 40))
-        ex = [e.get("round") for e in audit() if e["event"] == "executed" and e.get("fingerprint") == "c3"]
-        check("C3 audit ghi đúng số vòng của các lệnh đã chạy (1 rồi 2)", ex == [1, 2], str(ex))
+        r2 = wait_for(lambda: next(iter(msgs("AI TIẾP TỤC (vòng 2/3)")), None), 60)
+        check("C3 vòng 2: prompt có TÓM TẮT phân tích vòng 1 (AI không nhớ phiên cũ)", r2 and "tóm tắt vòng trước: CÓ" in r2["text"])
+        check("C3 vòng 2: prompt có lịch sử lệnh đã chạy và bản đồ hệ thống",
+              r2 and "lịch sử lệnh: CÓ" in r2["text"] and "bản đồ hệ thống: CÓ" in r2["text"])
+        check("C3 vòng 2: AI lặp lại đúng lệnh vòng 1, công cụ báo 'duplicate' ngay trong phiên",
+              r2 and "propose_fix trả: duplicate" in r2["text"])
+        check("C3 AI không còn lệnh khác -> bridge báo vòng kết thúc, không có nút Duyệt mới",
+              wait_for(lambda: msgs("không còn lệnh an toàn"), 20) and
+              not [m for m in msgs("ĐỀ XUẤT LỆNH") if "vòng 2/3" in m["text"]])
+        rounds = [e.get("round") for e in audit() if e["event"] == "executed" and e.get("fingerprint") == "c3"]
+        check("C3 audit: chỉ vòng 1 được chạy", rounds == [1], str(rounds))
     http("POST", MOCK + "/_down", {"jobs": []})
 
     print("- C4: nút ⏹ Dừng trên tin xin duyệt -> huỷ đề xuất, không chạy gì")
     http("POST", MOCK + "/_reset", {})
-    fire("c4", "logs_tail", BACKEND)
+    fire("c4", "restart_container", W1)
     p = wait_for(lambda: next(iter(msgs("ĐỀ XUẤT LỆNH")), None), 40)
     check("C4 có tin xin duyệt", p)
     if p:
         click(p["message_id"], 2)
         check("C4 báo 'Đã dừng xử lý tự động'", wait_for(lambda: msgs("Đã dừng xử lý tự động"), 20))
         check("C4 audit loop_stopped", wait_for(lambda: audit_has("loop_stopped", "c4"), 10))
-        click(p["message_id"], 0)                                  # nút cũ đã bị huỷ -> bấm vô hiệu
+        click(p["message_id"], 0)
         time.sleep(2)
-        check("C4 bấm Duyệt sau khi Dừng không chạy gì", not msgs("Log cuối của"))
+        check("C4 bấm Duyệt sau khi Dừng không chạy gì", not audit_find("executed", fingerprint="c4"))
 
     print("- C5: lệnh /stop gõ trong chat (người lạ bị bỏ qua, đúng người thì dừng)")
     http("POST", MOCK + "/_reset", {})
-    fire("c5", "logs_tail", BACKEND)
+    fire("c5", "restart_container", W2)
     p = wait_for(lambda: next(iter(msgs("ĐỀ XUẤT LỆNH")), None), 40)
     check("C5 có tin xin duyệt", p)
     if p:
@@ -345,7 +380,7 @@ def phase_loop():
 
     print("- C6: cảnh báo RESOLVED -> đề xuất đang chờ bị huỷ, vòng đóng")
     http("POST", MOCK + "/_reset", {})
-    alert = fire("c6", "logs_tail", BACKEND)
+    alert = fire("c6", "restart_container", W3)
     p = wait_for(lambda: next(iter(msgs("ĐỀ XUẤT LỆNH")), None), 40)
     check("C6 có tin xin duyệt", p)
     if p:
@@ -354,7 +389,140 @@ def phase_loop():
         check("C6 bridge vẫn gửi tin 'đã hoạt động bình thường'", wait_for(lambda: msgs("ĐÃ HOẠT ĐỘNG BÌNH THƯỜNG"), 20))
         click(p["message_id"], 0)
         time.sleep(2)
-        check("C6 bấm Duyệt trên đề xuất đã bị huỷ không chạy gì", not msgs("Log cuối của"))
+        check("C6 bấm Duyệt trên đề xuất đã bị huỷ không chạy gì", not audit_find("executed", fingerprint="c6"))
+
+    print("- C7: gõ câu nói tự nhiên (đường A, từ khoá) -> hiện đúng lệnh đã hiểu kèm nút -> bấm Duyệt thì chạy thật")
+    http("POST", MOCK + "/_reset", {})
+    w1_before = started_at(W1)
+    say(f"khởi động lại {W1}")
+    p = wait_for(lambda: next(iter(msgs("LỆNH BẠN VỪA GÕ")), None), 15)
+    check("C7 bot hiểu câu nói: hiện lệnh restart_container đúng container, 3 nút",
+          p and "restart_container" in p["text"] and W1 in p["text"] and len(p["buttons"]) == 3)
+    check("C7 chưa bấm Duyệt thì container chưa restart", started_at(W1) == w1_before)
+    if p:
+        click(p["message_id"], 0)
+        check("C7 bấm Duyệt -> container THẬT sự restart", wait_for(lambda: started_at(W1) != w1_before, 30))
+        check("C7 audit ghi manual_command và executed", audit_find("manual_command", approver="999") and
+              any(e["event"] == "executed" and e.get("container") == W1 for e in audit()))
+
+    print("- C8: câu nói / lệnh nguy hiểm (xoá container) -> KHÔNG ĐƯỢC PHÉP, không chạy gì")
+    http("POST", MOCK + "/_reset", {})
+    db_before = started_at(DB)
+    say(f"xóa {DB} đi")
+    check("C8 'xóa <container>' bị chặn", wait_for(lambda: msgs("KHÔNG ĐƯỢC PHÉP"), 15))
+    http("POST", MOCK + "/_reset", {})
+    say(f"docker rm -f {DB}")
+    check("C8 'docker rm -f <container>' bị chặn", wait_for(lambda: msgs("KHÔNG ĐƯỢC PHÉP"), 15))
+    check("C8 DB không bị đụng và không có nút nào", started_at(DB) == db_before and not msgs("LỆNH BẠN VỪA GÕ"))
+
+    print("- C9: câu hỏi tự do (đường B): remediator nhờ AI qua bridge /chat; AI (mock) đọc trạng thái bằng công cụ")
+    http("POST", MOCK + "/_reset", {})
+    say(f"vì sao {NGINX} chậm vậy?")
+    check("C9 bot báo đang nhờ AI", wait_for(lambda: msgs("Đang nhờ AI"), 15))
+    ans = wait_for(lambda: next(iter(msgs("AI trả lời")), None), 60)
+    check("C9 AI trả lời, đã đọc trạng thái container qua công cụ", ans and "đã đọc trạng thái" in ans["text"] and NGINX in ans["text"])
+    check("C9 audit: chat_request queued + tool_read của phiên chat",
+          audit_find("chat_request", result="queued") and
+          any(e["event"] == "tool_read" and str(e.get("fingerprint", "")).startswith("chat-") for e in audit()))
+
+    print("- C12: /ai: phiên làm việc với AI có trí nhớ; AI tự biết container nào cần chạy lại, đề xuất kèm nút Duyệt")
+    http("POST", MOCK + "/_reset", {})
+    say("/ai")
+    check("C12 /ai mở phiên và hướng dẫn cách dùng", wait_for(lambda: msgs("Đã mở phiên làm việc với AI"), 15))
+    say(f"{W2} bị treo rồi, xử lý giúp tôi")           # không có động từ rõ ràng -> phải nhờ AI hiểu và tự chọn lệnh
+    reply = wait_for(lambda: next(iter(msgs("AI trả lời")), None), 60)
+    check("C12 AI đọc trạng thái thật rồi tự chọn restart_container (container đang chạy)",
+          reply and "running=True" in reply["text"] and "propose_fix restart_container: queued" in reply["text"])
+    check("C12 AI báo đã gửi đề xuất kèm nút Duyệt", reply and "kèm nút Duyệt" in reply["text"])
+    prop = wait_for(lambda: next((m for m in msgs("ĐỀ XUẤT LỆNH") if W2 in m["text"] and "restart_container" in m["text"]), None), 20)
+    check("C12 có tin đề xuất đúng container, 3 nút (AI không tự chạy)", prop and len(prop["buttons"]) == 3)
+    check("C12 chưa bấm Duyệt thì container chưa bị đụng", not audit_find("executed", container=W2))
+    check("C12 tin đầu của phiên: AI nhận tình trạng hiện tại, chưa có lịch sử",
+          reply and "tình trạng hiện tại: CÓ" in reply["text"] and "lịch sử hội thoại: KHÔNG" in reply["text"])
+    if prop:
+        click(prop["message_id"], 1)
+    http("POST", MOCK + "/_reset", {})
+    say("cái đó thì sao?")
+    reply2 = wait_for(lambda: next(iter(msgs("AI trả lời")), None), 60)
+    check("C12 tin thứ hai: AI nhớ lượt trước (có lịch sử hội thoại)", reply2 and "lịch sử hội thoại: CÓ" in reply2["text"])
+    http("POST", MOCK + "/_reset", {})
+    chats_before = len(audit_find("chat_request"))
+    t0 = time.time()
+    say(f"khởi động lại {W3}")                                 # câu lệnh RÕ RÀNG trong phiên: hiểu ngay bằng từ khoá, không chờ AI
+    fast = wait_for(lambda: next(iter(msgs("LỆNH BẠN VỪA GÕ")), None), 15)
+    check("C12 câu lệnh rõ ràng trong phiên được hiểu NGAY (dưới 5 giây) và không gọi AI",
+          fast and W3 in fast["text"] and time.time() - t0 < 5 and len(audit_find("chat_request")) == chats_before)
+    if fast:
+        click(fast["message_id"], 1)
+    http("POST", MOCK + "/_reset", {})
+    say("/ai off")
+    check("C12 /ai off kết thúc phiên", wait_for(lambda: msgs("Đã kết thúc phiên AI"), 15))
+    check("C12 audit có ai_session_start và ai_session_end", audit_find("ai_session_start") and audit_find("ai_session_end"))
+    http("POST", MOCK + "/_reset", {})
+    say("ok")
+    time.sleep(3)
+    check("C12 sau khi đóng phiên, tin ngắn 'ok' bị bỏ qua (không gọi AI)", not msgs("AI trả lời"))
+
+    print("- C13: chat TRỰC TIẾP (không Holmes, không công cụ): hỏi về bot / kiến thức chung -> trả lời nhanh, chữ hiện dần")
+    http("POST", MOCK + "/_reset", {})
+    say("/ai")
+    wait_for(lambda: msgs("Đã mở phiên làm việc với AI"), 15)
+    http("POST", MOCK + "/_reset", {})
+    tools_before = len([e for e in audit() if e["event"] in ("tool_read", "tool_propose") and str(e.get("fingerprint", "")).startswith("chat-")])
+    t0 = time.time()
+    say("bạn làm được những gì?")
+    ans = wait_for(lambda: next(iter(msgs("(mock-chat)")), None), 30)
+    elapsed = time.time() - t0
+    check("C13 trả lời bằng chat trực tiếp (mô hình giả), không qua Holmes", ans and "(mock) " not in ans["text"])
+    check("C13 nhanh (dưới 8 giây tới chữ đầu tiên, không phải khởi động Holmes)", ans and elapsed < 8)
+    full = wait_for(lambda: next((m for m in msgs("Lịch sử:")), None), 15)         # tin được sửa dần: đợi đủ câu rồi mới kiểm nội dung
+    check("C13 chữ hiện dần: 1 tin được sửa nhiều lần cho tới khi đủ câu", full and len(state()["text_edits"]) >= 1)
+    check("C13 prompt có luật [[OPS]], mô tả khả năng bot và bản đồ hệ thống", full and "Luật OPS: CÓ" in full["text"] and "bản đồ: CÓ" in full["text"])
+    check("C13 tin đầu của phiên chưa có lịch sử", full and "Lịch sử: KHÔNG" in full["text"])
+    check("C13 không dùng công cụ nào (không tool_read/tool_propose mới)",
+          len([e for e in audit() if e["event"] in ("tool_read", "tool_propose") and str(e.get("fingerprint", "")).startswith("chat-")]) == tools_before)
+    http("POST", MOCK + "/_reset", {})
+    say("giải thích restart policy của docker")
+    ans2 = wait_for(lambda: next(iter(msgs("(mock-chat)")), None), 30)
+    check("C13 tin thứ hai trong phiên: chat trực tiếp nhớ lượt trước", ans2 and wait_for(lambda: next((m for m in msgs("Lịch sử: CÓ")), None), 15))
+
+    print("- C14: câu cần dữ liệu thật: mô hình tự báo [[OPS]] -> bridge chuyển sang Holmes (không lộ dấu hiệu cho người dùng)")
+    http("POST", MOCK + "/_reset", {})
+    say("cho tôi biết hiện tại có gì bất thường không")
+    esc = wait_for(lambda: next((m for m in msgs("AI trả lời") if "(mock)" in m["text"]), None), 60)
+    check("C14 Holmes (mock) trả lời sau khi mô hình chat báo cần dữ liệu thật", esc)
+    check("C14 người dùng không bao giờ thấy dấu hiệu [[OPS]]", not [m for m in state()["messages"] if "[[OPS]]" in m["text"]])
+    lg = subprocess.run(["docker", "logs", "sbx-holmes-bridge"], capture_output=True, text=True, encoding="utf-8", errors="replace")
+    logs = lg.stdout + lg.stderr                       # log Python ghi ra stderr
+    check("C14 log bridge ghi việc chuyển sang Holmes", "chuyển sang Holmes" in logs)
+    http("POST", MOCK + "/_reset", {})
+    say("/ai off")
+    wait_for(lambda: msgs("Đã kết thúc phiên AI"), 15)
+
+    print("- C10: /status <container>: chạy ngay, chỉ đọc, KHÔNG lộ biến môi trường")
+    http("POST", MOCK + "/_reset", {})
+    say(f"/status {DB}")
+    shown = wait_for(lambda: next(iter(msgs("sbx-db ·")), None), 30)
+    check("C10 /status db được phép (ngoại lệ chỉ đọc), trả ngay trạng thái đã lọc (có 'running'), không cần nút",
+          shown and "running" in shown["text"] and not msgs("LỆNH BẠN VỪA GÕ"))
+    leaked = (shown or {}).get("text", "") + json.dumps(audit())
+    check("C10 KHÔNG lộ biến môi trường (PATH=...) trong Telegram và audit", "PATH=" not in leaked and "Env" not in leaked)
+
+    print("- C11: hỏi tổng quan bằng câu nói tự nhiên -> bot lấy số liệu Docker + Prometheus và báo lại ngay (không AI)")
+    http("POST", MOCK + "/_reset", {})
+    chats_before = len(audit_find("chat_request"))       # audit giữ cả lịch sử (C9 đã tạo 1 bản ghi), nên so số lượng trước/sau
+    say("các container hiện tại thế nào?")
+    ov = wait_for(lambda: next(iter(msgs("Tình trạng hệ thống")), None), 40)
+    check("C11 báo cáo tổng quan liệt kê container, đếm đủ 6/6 đang chạy", ov and "6/6" in ov["text"])
+    check("C11 có dòng máy chủ, web và cảnh báo đang bật", ov and "Máy:" in ov["text"] and "Cảnh báo đang bật" in ov["text"])
+    check("C11 không có nút, không gọi AI, không lộ biến môi trường",
+          ov and not ov["buttons"] and "PATH=" not in ov["text"] and len(audit_find("chat_request")) == chats_before)
+    http("POST", MOCK + "/_reset", {})
+    sh(["docker", "stop", "ecommerce-sbx-worker3"])
+    say("/status")
+    ov2 = wait_for(lambda: next(iter(msgs("Tình trạng hệ thống")), None), 40)
+    check("C11 container vừa dừng hiện 🔴 và đếm 5/6", ov2 and "🔴 sbx-worker3" in ov2["text"] and "5/6" in ov2["text"])
+    sh(["docker", "start", "ecommerce-sbx-worker3"], check=False)
 
 
 def summary():

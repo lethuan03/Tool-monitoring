@@ -19,8 +19,11 @@ const { requireAdmin, loadUser, rejectCrossSite } = require('../auth/middleware'
 const router = express.Router();
 const asyncHandler = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
-// Sai 5 lần trong 15 phút -> khoá 15 phút (theo IP và theo tên đăng nhập)
+// Theo IP: sai 5 lần trong 15 phút -> khoá IP đó 15 phút (chặn dò mật khẩu từ 1 máy).
 const limiter = createLimiter({ max: 5, windowMs: 15 * 60 * 1000, lockMs: 15 * 60 * 1000 });
+// Theo TÊN đăng nhập: ngưỡng cao hơn (20). Nếu cũng là 5 thì kẻ xấu chỉ cần gõ sai 5 lần là KHOÁ được admin thật
+// (từ chối dịch vụ). 20 vẫn chặn dò mật khẩu phân tán (nhiều IP) mà khó bị lợi dụng để khoá người dùng.
+const userLimiter = createLimiter({ max: 20, windowMs: 15 * 60 * 1000, lockMs: 15 * 60 * 1000 });
 
 // Hash giả để khi username không tồn tại vẫn tốn đúng thời gian như khi sai mật khẩu
 // -> không đoán được "tài khoản này có tồn tại không" qua thời gian phản hồi
@@ -45,7 +48,7 @@ router.post(
 
     const ipKey = `ip:${req.ip}`;
     const userKey = `user:${name.toLowerCase()}`;
-    const wait = Math.max(limiter.retryAfterMs(ipKey), limiter.retryAfterMs(userKey));
+    const wait = Math.max(limiter.retryAfterMs(ipKey), userLimiter.retryAfterMs(userKey));
     if (wait > 0) {
       log.warn('login_locked', { reason: 'rate_limited' });
       return tooMany(res, wait);
@@ -58,14 +61,14 @@ router.post(
 
     if (!ok) {
       limiter.fail(ipKey);
-      limiter.fail(userKey);
+      userLimiter.fail(userKey);
       log.warn('login_failed', { reason: user ? 'wrong_password' : 'unknown_user' });
       // Cùng một thông báo cho cả 2 trường hợp
       return res.status(401).json({ error: 'Sai tên đăng nhập hoặc mật khẩu' });
     }
 
     limiter.reset(ipKey);
-    limiter.reset(userKey);
+    userLimiter.reset(userKey);
     setSessionCookie(req, res, await createSession(user.id));
     log.info('login_success', { user_id: user.id, role: user.role });
     res.json({ username: user.username, role: user.role });
@@ -114,7 +117,7 @@ router.post(
   asyncHandler(async (req, res) => {
     const { currentPassword, newPassword } = req.body || {};
     const userKey = `user:${req.user.username.toLowerCase()}`;
-    const wait = limiter.retryAfterMs(userKey);
+    const wait = limiter.retryAfterMs(userKey);   // đổi mật khẩu: đã đăng nhập rồi, giữ ngưỡng chặt 5 lần
     if (wait > 0) return tooMany(res, wait);
 
     const problem = checkNewPassword(newPassword);

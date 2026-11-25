@@ -59,9 +59,17 @@ fi
 
 # ---- AI phân tích (holmes-bridge) ----
 AI_WEBHOOK_URL=$(printf '%s' "${AI_WEBHOOK_URL:-}" | tr -d ' \r\n"'"'")
+AI_WEBHOOK_TOKEN=$(printf '%s' "${AI_WEBHOOK_TOKEN:-}" | tr -d ' \r\n"'"'")
 if [ -n "$AI_WEBHOOK_URL" ]; then
   sed -i "s#__AI_WEBHOOK_URL__#${AI_WEBHOOK_URL}#" /tmp/alertmanager.yml
-  echo "AI phân tích: BẬT (webhook ${AI_WEBHOOK_URL})"
+  if [ -n "$AI_WEBHOOK_TOKEN" ]; then
+    # Token ghi ra file riêng trong container (không chèn vào cấu hình, không in ra log)
+    printf '%s' "$AI_WEBHOOK_TOKEN" > /tmp/ai_webhook_token
+    echo "AI phân tích: BẬT (webhook ${AI_WEBHOOK_URL}, có token)"
+  else
+    sed -i '/# >>> ai-token/,/# <<< ai-token/d' /tmp/alertmanager.yml
+    echo "AI phân tích: BẬT (webhook ${AI_WEBHOOK_URL}, KHÔNG token: nên đặt REMEDIATOR_TOOL_TOKEN)"
+  fi
 else
   sed -i '/# >>> ai/,/# <<< ai/d' /tmp/alertmanager.yml
   echo "AI phân tích: tắt (không có AI_WEBHOOK_URL)"

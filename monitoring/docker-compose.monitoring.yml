@@ -68,6 +68,8 @@ services:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
       - TELEGRAM_API_URL=${TELEGRAM_API_URL:-https://api.telegram.org}
+      # Token gửi kèm webhook AI (holmes-bridge bắt token cho /alert); cùng giá trị với REMEDIATOR_TOOL_TOKEN
+      - AI_WEBHOOK_TOKEN=${REMEDIATOR_TOOL_TOKEN:-}
       - ALERTMANAGER_URL=${ALERTMANAGER_URL:-http://localhost/admin/alertmanager/}
       # Có giá trị (http://holmes-bridge:8080/alert) = bật AI phân tích (service holmes-bridge)
       - AI_WEBHOOK_URL=${AI_WEBHOOK_URL:-}
@@ -184,6 +186,10 @@ services:
       - REMEDIATOR_URL=${REMEDIATOR_URL:-}
       # Số vòng AI tối đa cho 1 sự cố (mỗi vòng = 1 lượt Bedrock, tính phí). 1 = tắt vòng lặp.
       - AI_MAX_ROUNDS=${AI_MAX_ROUNDS:-3}
+      # Cách 2: AI gọi công cụ (cần REMEDIATOR_URL + REMEDIATOR_TOOL_TOKEN, cùng giá trị với service remediator).
+      # Thiếu token hoặc AI_USE_TOOLS=false = cách cũ (AI ghi 1 dòng chữ).
+      - REMEDIATOR_TOOL_TOKEN=${REMEDIATOR_TOOL_TOKEN:-}
+      - AI_USE_TOOLS=${AI_USE_TOOLS:-true}
       - MODEL=bedrock/${BEDROCK_MODEL_ID:-us.anthropic.claude-sonnet-4-5-20250929-v1:0}
       - AWS_REGION_NAME=${BEDROCK_REGION:-}
       - AWS_DEFAULT_REGION=${BEDROCK_REGION:-}
@@ -201,40 +207,24 @@ services:
     logging: *default-logging
     restart: unless-stopped
 
-  # docker-proxy — cổng DUY NHẤT tới Docker API cho remediator. Chỉ cho phép API
-  # container (xem/khởi động/khởi động lại); chặn exec, image, volume, network, swarm...
+  # docker-proxy — cổng DUY NHẤT tới Docker API cho remediator. Proxy ALLOWLIST tự viết
+  # (ai-remediation/docker-proxy): chỉ cho inspect/logs/stats/restart/start đúng container
+  # ecommerce-*, mọi thứ khác (tạo/xoá container, exec, ghi file, image, volume...) trả 403.
+  # Thay tecnativa/docker-socket-proxy vì bật POST=1 ở đó là cho tạo + xoá container.
   # Nằm trên mạng "dockernet" (internal, không ra internet), chỉ remediator vào được.
   docker-proxy:
-    image: tecnativa/docker-socket-proxy:0.3.0
+    image: thuanperry/ecommerce-docker-proxy:latest
     container_name: ecommerce-docker-proxy
     profiles: ["ai"]
     environment:
-      - CONTAINERS=1
-      - POST=1
-      - ALLOW_START=1
-      - ALLOW_RESTARTS=1
-      - ALLOW_STOP=0
-      - EXEC=0
-      - IMAGES=0
-      - VOLUMES=0
-      - NETWORKS=0
-      - SERVICES=0
-      - TASKS=0
-      - SWARM=0
-      - SECRETS=0
-      - CONFIGS=0
-      - BUILD=0
-      - COMMIT=0
-      - AUTH=0
-      - PLUGINS=0
-      - SYSTEM=0
-      - INFO=0
-      - EVENTS=0
-      - DISTRIBUTION=0
-      - NODES=0
-      - SESSION=0
+      - ALLOW_PREFIX=ecommerce-
+      - DENY_CONTAINERS=ecommerce-holmes-bridge,ecommerce-remediator,ecommerce-docker-proxy,ecommerce-alloy-docker-proxy
+      - RESTART_DENY=ecommerce-db
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     networks:
       - dockernet
     logging: *default-logging
@@ -257,9 +247,12 @@ services:
       - REMEDIATION_ENABLED=${REMEDIATION_ENABLED:-true}
       - REMEDIATOR_SECRET=${REMEDIATOR_SECRET:-}
       - REMEDIATOR_APPROVER_IDS=${REMEDIATOR_APPROVER_IDS:-}
+      - REMEDIATOR_ALLOW_ANY_GROUP_MEMBER=${REMEDIATOR_ALLOW_ANY_GROUP_MEMBER:-false}
       # Vòng lặp: gửi kết quả lệnh cho AI (holmes-bridge) để đề xuất bước tiếp. AI_MAX_ROUNDS=1 = tắt vòng lặp.
       - BRIDGE_URL=http://holmes-bridge:8080
       - AI_MAX_ROUNDS=${AI_MAX_ROUNDS:-3}
+      # Token của tool API cho AI (/tool/*). Trống = tool API tắt hẳn.
+      - REMEDIATOR_TOOL_TOKEN=${REMEDIATOR_TOOL_TOKEN:-}
     volumes:
       - remediator-audit:/audit
     depends_on:

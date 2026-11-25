@@ -29,6 +29,16 @@ services:
   ecommerce-sbx-db:            # bị policy CẤM: dùng để kiểm tra AI đòi restart DB thì bị chặn
     <<: *victim
     container_name: ecommerce-sbx-db
+  # 3 container phụ: mỗi kịch bản cần 1 container "còn mới" (chưa dính cooldown restart 5 phút)
+  ecommerce-sbx-worker1:
+    <<: *victim
+    container_name: ecommerce-sbx-worker1
+  ecommerce-sbx-worker2:
+    <<: *victim
+    container_name: ecommerce-sbx-worker2
+  ecommerce-sbx-worker3:
+    <<: *victim
+    container_name: ecommerce-sbx-worker3
 
   # ---- mock Telegram + Prometheus ----
   mock:
@@ -37,37 +47,19 @@ services:
     ports: ["127.0.0.1:18081:8081"]
     networks: [sbxnet]
 
-  # ---- docker-proxy: y hệt production (chỉ API container, mạng nội bộ) ----
+  # ---- docker-proxy: ĐÚNG proxy allowlist của production; chỉ cho container ecommerce-sbx-* ----
   docker-proxy:
-    image: tecnativa/docker-socket-proxy:0.3.0
+    build: {context: ../docker-proxy}
     container_name: sbx-docker-proxy
     environment:
-      - CONTAINERS=1
-      - POST=1
-      - ALLOW_START=1
-      - ALLOW_RESTARTS=1
-      - ALLOW_STOP=0
-      - EXEC=0
-      - IMAGES=0
-      - VOLUMES=0
-      - NETWORKS=0
-      - SERVICES=0
-      - TASKS=0
-      - SWARM=0
-      - SECRETS=0
-      - CONFIGS=0
-      - BUILD=0
-      - COMMIT=0
-      - AUTH=0
-      - PLUGINS=0
-      - SYSTEM=0
-      - INFO=0
-      - EVENTS=0
-      - DISTRIBUTION=0
-      - NODES=0
-      - SESSION=0
+      - ALLOW_PREFIX=ecommerce-sbx-
+      - DENY_CONTAINERS=sbx-holmes-bridge,sbx-remediator,sbx-docker-proxy,sbx-mock
+      - RESTART_DENY=ecommerce-sbx-db
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     networks: [dockernet]
 
   # ---- remediator thật, dùng policy sandbox ----
@@ -88,6 +80,7 @@ services:
       - REMEDIATOR_POST_CHECK_DELAY_SECONDS=1
       - BRIDGE_URL=http://holmes-bridge:8080
       - AI_MAX_ROUNDS=3
+      - REMEDIATOR_TOOL_TOKEN=sandbox-tool-token-not-real-0123456789abcdef
     volumes:
       - ./policy.sandbox.json:/app/policy.sandbox.json:ro
     depends_on: [docker-proxy, mock]
@@ -106,6 +99,12 @@ services:
       - PROMETHEUS_URL=http://mock:8081
       - REMEDIATOR_URL=http://remediator:8090
       - AI_MAX_ROUNDS=3
+      # Cách 2: AI (mock) gọi công cụ thật qua remediator /tool/*; đặt AI_USE_TOOLS=false để thử đường cũ (dòng chữ)
+      - REMEDIATOR_TOOL_TOKEN=sandbox-tool-token-not-real-0123456789abcdef
+      - AI_USE_TOOLS=${SBX_USE_TOOLS:-true}
+      # Chat trực tiếp dùng mô hình GIẢ (module mock_llm), sửa tin mỗi 0.2 giây để thử streaming
+      - AI_CHAT_LLM_MODULE=mock_llm
+      - AI_CHAT_STREAM_EDIT_SECONDS=0.2
       - AI_MAX_PER_HOUR=100
       - AI_CONFIRM_DELAY_SECONDS=1
       # Giá trị GIẢ để vượt qua bước kiểm tra "có khoá Bedrock"; mock_holmes không dùng tới

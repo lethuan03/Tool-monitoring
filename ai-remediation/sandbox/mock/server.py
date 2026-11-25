@@ -19,13 +19,13 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 cond = threading.Condition()
-S = {"messages": [], "answers": [], "edits": [], "updates": [], "next_msg": 1, "next_update": 1, "down": []}
+S = {"messages": [], "answers": [], "edits": [], "text_edits": [], "updates": [], "next_msg": 1, "next_update": 1, "down": []}
 
 
 def reset():
     # update_id PHẢI luôn tăng (như Telegram thật): client nhớ offset, đặt lại về 1 sẽ làm nó bỏ qua nút bấm mới
     with cond:
-        S.update(messages=[], answers=[], edits=[], updates=[], next_msg=1, down=[])
+        S.update(messages=[], answers=[], edits=[], text_edits=[], updates=[], next_msg=1, down=[])
 
 
 class H(BaseHTTPRequestHandler):
@@ -52,7 +52,7 @@ class H(BaseHTTPRequestHandler):
             return self._json({"status": "success", "data": {"resultType": "vector", "result": res}})
         if self.path == "/_state":
             with cond:
-                return self._json({k: S[k] for k in ("messages", "answers", "edits")})
+                return self._json({k: S[k] for k in ("messages", "answers", "edits", "text_edits")})
         self._json({"ok": False}, 404)
 
     def do_POST(self):
@@ -94,6 +94,15 @@ class H(BaseHTTPRequestHandler):
                 cond.wait_for(lambda: any(u["update_id"] >= offset for u in S["updates"]), timeout=timeout)
                 res = [u for u in S["updates"] if u["update_id"] >= offset]
             return self._json({"ok": True, "result": res})
+        if method == "editMessageText":     # chữ hiện dần: cập nhật nội dung tin đã gửi
+            with cond:
+                msg = next((x for x in S["messages"] if x["message_id"] == body.get("message_id")), None)
+                if msg:
+                    msg["text"] = body.get("text", "")
+                    S["text_edits"].append(body.get("message_id"))
+            return self._json({"ok": bool(msg), "result": True})
+        if method == "sendChatAction":
+            return self._json({"ok": True, "result": True})
         if method == "answerCallbackQuery":
             with cond:
                 S["answers"].append(body.get("text", ""))

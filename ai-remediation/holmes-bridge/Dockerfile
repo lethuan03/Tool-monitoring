@@ -6,12 +6,16 @@
 # Python dùng thư viện chuẩn. Không có secret nào trong image: token Telegram
 # và khoá Bedrock chỉ đọc từ .env lúc container chạy.
 # ============================================================================
-ARG HOLMES_IMAGE=thuanperry/ecommerce-holmes:0.45.0
+ARG HOLMES_IMAGE=thuanperry/ecommerce-holmes:latest
 FROM ${HOLMES_IMAGE}
 
 COPY bridge.py /app/bridge.py
 # Runbook markdown theo alertname, chèn vào prompt để AI điều tra nhanh hơn
 COPY runbooks /app/runbooks
+# Công cụ cho AI (cách 2): holmes gọi qua toolset "remediation/tools" trong config.yaml của image holmes
+COPY tools /app/tools
+# Bản đồ hệ thống chèn vào prompt để AI hiểu quan hệ giữa các thành phần (knowledge/system.md)
+COPY knowledge /app/knowledge
 
 # Chỉ nghe trong mạng Docker nội bộ (không publish port ra máy chủ)
 EXPOSE 8080

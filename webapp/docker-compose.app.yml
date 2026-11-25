@@ -89,6 +89,8 @@ services:
     environment:
       - MONITORING_BASIC_AUTH_USER=${MONITORING_BASIC_AUTH_USER:?set MONITORING_BASIC_AUTH_USER in .env.app}
       - MONITORING_BASIC_AUTH_PASSWORD=${MONITORING_BASIC_AUTH_PASSWORD:?set MONITORING_BASIC_AUTH_PASSWORD in .env.app}
+      # true khi đã có HTTPS (ALB + ACM hoặc certbot): HTTP tự chuyển sang HTTPS. Mặc định false (chạy local bằng HTTP).
+      - FORCE_HTTPS=${FORCE_HTTPS:-false}
     depends_on:
       backend:
         condition: service_healthy
@@ -145,7 +147,7 @@ services:
       - shared
     logging: *default-logging
     restart: unless-stopped
-  # 7) Alloy — đọc log mọi container qua docker socket, đẩy sang Loki (file
+  # 7) Alloy — đọc log mọi container qua alloy-docker-proxy (chỉ đọc), đẩy sang Loki (file
   # monitoring) bằng tên container trên network "shared".
   alloy:
     image: thuanperry/ecommerce-alloy:latest
@@ -156,14 +158,44 @@ services:
       # join network "shared".
       - LOKI_PUSH_URL=${LOKI_PUSH_URL:-http://ecommerce-loki:3100/loki/api/v1/push}
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
       - alloy-data:/var/lib/alloy/data
+    # KHÔNG mount docker.sock nữa (":ro" trên socket không chặn được API -> Alloy từng có toàn quyền Docker).
+    # Alloy đọc danh sách container + log qua alloy-docker-proxy (chỉ GET) trên mạng nội bộ "alloydocker".
+    depends_on:
+      - alloy-docker-proxy
     networks:
+      - alloydocker
       - appnet
       - shared
     logging: *default-logging
     restart: unless-stopped
+
+  # 7b) alloy-docker-proxy — cửa CHỈ ĐỌC tới Docker API cho Alloy (liệt kê container, mạng, đọc log).
+  # POST=0: không tạo/xoá/khởi động/dừng được gì. Chỉ Alloy vào được (mạng "alloydocker" internal).
+  alloy-docker-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0
+    container_name: ecommerce-alloy-docker-proxy
+    environment:
+      - CONTAINERS=1
+      - NETWORKS=1
+      - POST=0
+      - EVENTS=0
+      - IMAGES=0
+      - VOLUMES=0
+      - EXEC=0
+      - INFO=0
+      - SYSTEM=0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    security_opt: ["no-new-privileges:true"]
+    networks:
+      - alloydocker
+    logging: *default-logging
+    restart: unless-stopped
 networks:
+  alloydocker:
+    driver: bridge
+    internal: true        # chỉ Alloy <-> alloy-docker-proxy, không ra internet
   appnet:
     driver: bridge
   shared:

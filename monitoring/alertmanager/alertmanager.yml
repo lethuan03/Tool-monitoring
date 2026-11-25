@@ -63,6 +63,13 @@ receivers:
     webhook_configs:
       - url: '__AI_WEBHOOK_URL__'
         send_resolved: true                # hết sự cố -> bridge gửi tin "đã hoạt động bình thường"
+        # >>> ai-token
+        # holmes-bridge bắt token (REMEDIATOR_TOOL_TOKEN) cho /alert: container khác trong mạng không giả cảnh báo được
+        http_config:
+          authorization:
+            type: Bearer
+            credentials_file: /tmp/ai_webhook_token
+        # <<< ai-token
     # <<< ai
 
 # --- Chặn mail trùng lặp ---

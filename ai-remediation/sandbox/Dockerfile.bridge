@@ -3,6 +3,10 @@
 FROM python:3.12-slim
 COPY holmes-bridge/bridge.py /app/bridge.py
 COPY holmes-bridge/runbooks /app/runbooks
+COPY holmes-bridge/tools /app/tools
+COPY holmes-bridge/knowledge /app/knowledge
 COPY sandbox/mock/mock_holmes.py /app/mock_holmes.py
+# Mô hình giả cho chat trực tiếp (thay litellm; không Bedrock)
+COPY sandbox/mock/mock_llm.py /app/mock_llm.py
 EXPOSE 8080
 ENTRYPOINT ["python", "-u", "/app/bridge.py"]

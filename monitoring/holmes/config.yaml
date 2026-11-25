@@ -30,5 +30,70 @@ toolsets:
     config:
       api_url: http://loki:3100
 
+  # TẮT các toolset Holmes bật sẵn nhưng có thể bị lợi dụng khi AI đọc log có nội dung do kẻ xấu gài (prompt injection):
+  #  - internet: tải URL công khai bất kỳ -> có thể gửi dữ liệu log ra máy của kẻ tấn công (kèm trong URL)
+  #  - connectivity_check: mở kết nối TCP tới máy bất kỳ, kể cả IP nội bộ -> dò mạng nội bộ
+  #  - bash: chạy lệnh shell (bridge đã thêm --bash-always-deny; tắt hẳn cho chắc)
+  # AI vẫn đủ công cụ: Prometheus, Loki và remediation/tools (chỉ đọc + đề xuất có người duyệt).
+  internet:
+    enabled: false
+  connectivity_check:
+    enabled: false
+  bash:
+    enabled: false
+
   # Không bật toolset docker/kubernetes: muốn dùng phải mount docker.sock
   # (= quyền root trên máy), không đáng cho việc điều tra chỉ cần đọc số + log.
+
+  # Công cụ làm việc với hệ thống (cách 2, xem ai-remediation/README2.md): AI ĐỌC trạng thái/log/CPU-RAM và ĐỀ XUẤT
+  # lệnh sửa lỗi. AI KHÔNG chạy được lệnh nào: propose_fix chỉ tạo nút Duyệt trên Telegram, luật nằm ở remediator
+  # (policy.json). Script chỉ có trong image holmes-bridge nên toolset tự tắt ở container `holmes` thường
+  # (prerequisite). Tham số {{ }} được Holmes đưa qua shlex.quote trước khi vào shell; danh tính sự cố (fingerprint,
+  # vòng) do bridge đặt qua biến môi trường, không phải tham số, nên AI không giả mạo được.
+  remediation/tools:
+    description: "Đọc trạng thái hệ thống và đề xuất lệnh sửa lỗi (người duyệt trên Telegram)"
+    prerequisites:
+      - command: "test -f /app/tools/remediation_tool.py"
+      - env:
+          - REMEDIATOR_TOOL_TOKEN
+          - REMEDIATOR_URL
+    tools:
+      - name: "list_allowed_actions"
+        description: "Xem kho lệnh được phép: action nào chỉ đọc (chạy ngay bằng read_status) hay cần người duyệt (propose_fix), và container nào được đụng. Gọi trước khi đề xuất."
+        command: "python /app/tools/remediation_tool.py catalog"
+
+      - name: "system_overview"
+        description: "Báo cáo tổng quan hệ thống bằng 1 lần gọi: trạng thái mọi container, CPU/RAM/ổ đĩa máy, req/s và lỗi 5xx của web, cảnh báo đang bật. Dùng khi người vận hành hỏi chung 'hệ thống thế nào'."
+        command: "python /app/tools/remediation_tool.py overview"
+
+      - name: "read_status"
+        description: "ĐỌC (chạy ngay, không đổi gì): log gần nhất, trạng thái (chạy/dừng, mã thoát, OOM, health, số lần restart) hoặc CPU/RAM của 1 container. Chỉ trả các trường an toàn."
+        command: "python /app/tools/remediation_tool.py read {{ action }} {{ container }}"
+        parameters:
+          action:
+            type: string
+            required: true
+            description: "logs_tail (100 dòng log cuối) | inspect_container (trạng thái; xem được cả ecommerce-db) | container_stats (CPU/RAM)"
+            enum: ["logs_tail", "inspect_container", "container_stats"]
+          container:
+            type: string
+            required: true
+            description: "Tên đầy đủ container, ví dụ ecommerce-backend"
+
+      - name: "propose_fix"
+        description: "ĐỀ XUẤT 1 lệnh sửa lỗi. KHÔNG chạy ngay: gửi nút Duyệt lên Telegram cho người vận hành. Tối đa 1 lần mỗi phiên. Nếu bị chặn sẽ trả lý do và gợi ý thay thế."
+        command: "python /app/tools/remediation_tool.py propose {{ action }} {{ container }} {{ reason }}"
+        parameters:
+          action:
+            type: string
+            required: true
+            description: "restart_container (khởi động lại) | start_container (bật lại container đã dừng)"
+            enum: ["restart_container", "start_container"]
+          container:
+            type: string
+            required: true
+            description: "Tên đầy đủ container, ví dụ ecommerce-mysqld-exporter"
+          reason:
+            type: string
+            required: true
+            description: "Lý do ngắn (1 câu) dựa trên bằng chứng đã đọc"

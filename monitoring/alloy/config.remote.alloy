@@ -15,7 +15,8 @@ logging {
 }
 
 discovery.docker "compose" {
-  host             = "unix:///var/run/docker.sock"
+  // Qua proxy CHỈ ĐỌC (alloy-docker-proxy), không mount docker.sock trực tiếp nữa
+  host             = "tcp://alloy-docker-proxy:2375"
   refresh_interval = "5s"
 }
 
@@ -43,7 +44,7 @@ discovery.relabel "compose" {
 }
 
 loki.source.docker "compose" {
-  host             = "unix:///var/run/docker.sock"
+  host             = "tcp://alloy-docker-proxy:2375"
   targets          = discovery.relabel.compose.output
   labels           = { job = "docker" }
   forward_to       = [loki.process.parse.receiver]
