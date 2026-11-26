@@ -452,3 +452,39 @@ Giới hạn của sandbox: không kiểm tra Telegram/Bedrock thật (**chất 
 - Chất lượng đề xuất của AI phụ thuộc vào model và runbook; cần theo dõi giai đoạn dry-run để chỉnh runbook.
 - Đề xuất lặp trong cùng 1 sự cố bị bỏ qua (đã chống trùng); cảnh báo mới (startsAt khác) là một sự cố mới.
 - `logs_tail` gửi tối đa 1500 ký tự log lên Telegram: log có thể chứa thông tin nhạy cảm, cân nhắc trước khi duyệt.
+
+## 10. Kéo log CI từ GitHub Actions — `ai-remediation/ci-logs/`
+
+Bước 1 của luồng "AI phân tích lỗi CI". **Mới chỉ tải log**; lớp filter và phần AI phân tích/báo lỗi chưa làm.
+
+```
+GitHub Actions ──(fetch_logs.py hỏi, chỉ đọc)──> data/<run_id>/<job_id>.log + .json ──> [filter: chưa làm] ──> [AI: chưa làm]
+```
+
+- `fetch_logs.py` (chỉ thư viện chuẩn Python) lấy các lần chạy đã xong trong `CI_LOG_DAYS` ngày, tải log của job có kết quả thuộc `CI_LOG_CONCLUSIONS` (mặc định `failure`). Job đã có file `.log` thì bỏ qua.
+- File `.log` là **log thô**, chưa lọc, chưa che bí mật. Thư mục `data/` đã chặn trong `.gitignore`.
+- File `.json` cạnh đó: workflow, tên job, step lỗi, nhánh, commit, link, `head_repo` (khác `repo` = PR từ fork).
+- Chưa nằm trong image/compose nào: chạy tay hoặc bằng cron. Chưa tự xoá log cũ.
+
+| Biến môi trường | Mặc định | Ý nghĩa |
+|---|---|---|
+| `GITHUB_REPO` | (bắt buộc) | `owner/repo` |
+| `GITHUB_TOKEN` | (bắt buộc) | Fine-grained token, chỉ repo này, quyền **Actions: Read-only** |
+| `CI_LOG_DIR` | `ai-remediation/ci-logs/data` | Nơi lưu log |
+| `CI_LOG_DAYS` | `5` | Lấy lần chạy tạo trong N ngày gần đây |
+| `CI_LOG_CONCLUSIONS` | `failure` | Kết quả job cần lấy, cách nhau dấu phẩy |
+| `GITHUB_API_URL` | `https://api.github.com` | Chỉ đổi khi test (token được gửi tới địa chỉ này) |
+
+Chạy (PowerShell):
+
+```powershell
+$env:GITHUB_REPO = "owner/repo"
+$env:GITHUB_TOKEN = Read-Host "GitHub token"
+python ai-remediation/ci-logs/fetch_logs.py
+```
+
+Test (GitHub giả trên 127.0.0.1): `python -m unittest discover -s ai-remediation/ci-logs/tests`
+
+**Chưa chạy thử với GitHub thật.**
+
+**Lưu ý cho bước sau:** log CI là nội dung không đáng tin (người gửi PR có thể in chữ gài lệnh cho AI) và có thể chứa bí mật. Trước khi đưa cho AI phải qua lớp filter (cắt đoạn lỗi, che token/mật khẩu), AI phân tích không được dùng công cụ nào.

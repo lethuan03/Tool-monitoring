@@ -12,3 +12,6 @@ ec2/
 # Python
 __pycache__/
 *.pyc
+
+# Log CI tải về (log thô, có thể chứa thông tin nhạy cảm)
+ai-remediation/ci-logs/data/
