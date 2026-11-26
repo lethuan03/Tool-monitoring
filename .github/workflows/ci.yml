@@ -3,7 +3,7 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, test/ci-fail]
   pull_request:
 
 # Huỷ lần chạy cũ của cùng nhánh khi có commit mới
