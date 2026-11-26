@@ -1,0 +1,81 @@
+# CI cho project: chạy test + build thử image. KHÔNG push image, KHÔNG gọi AWS/Bedrock/Telegram, KHÔNG deploy.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Huỷ lần chạy cũ của cùng nhánh khi có commit mới
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend (Node.js)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: webapp/backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20          # khớp node:20 trong webapp/backend/Dockerfile
+          cache: npm
+          cache-dependency-path: webapp/backend/package-lock.json
+      - run: npm ci
+      - run: npm test
+
+  frontend:
+    name: Frontend (Node.js)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: node --test webapp/frontend/tests/tools.test.js
+
+  ai-remediation:
+    name: AI remediation (Python)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [remediator, holmes-bridge, docker-proxy]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"    # khớp python:3.12-slim trong Dockerfile
+      - run: python -m unittest discover -s ai-remediation/${{ matrix.service }}/tests -v
+
+  docker-build:
+    name: Build thử image (không push)
+    runs-on: ubuntu-latest
+    needs: [backend, frontend, ai-remediation]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: backend,      context: webapp/backend }
+          - { name: frontend,     context: webapp/frontend }
+          - { name: nginx,        context: webapp/nginx }
+          - { name: db,           context: webapp/mysql }
+          - { name: remediator,   context: ai-remediation/remediator }
+          - { name: docker-proxy, context: ai-remediation/docker-proxy }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          push: false
+          tags: ecommerce-${{ matrix.name }}:ci
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
