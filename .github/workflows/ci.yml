@@ -3,7 +3,7 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: ['**']      # mọi nhánh: merge-gate cần CI xanh trước khi chạy thử và tạo PR
   pull_request:
 
 # Huỷ lần chạy cũ của cùng nhánh khi có commit mới
@@ -47,7 +47,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [remediator, holmes-bridge, docker-proxy]
+        service: [remediator, holmes-bridge, docker-proxy, ci-logs, merge-gate]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

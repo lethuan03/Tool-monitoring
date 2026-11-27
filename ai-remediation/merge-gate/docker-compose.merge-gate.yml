@@ -1,0 +1,27 @@
+# Chạy merge-gate trên máy local, tách khỏi stack shop/monitoring.
+#   cp ai-remediation/merge-gate/.env.mergegate.example ai-remediation/merge-gate/.env.mergegate   (rồi điền giá trị)
+#   docker compose -f ai-remediation/merge-gate/docker-compose.merge-gate.yml up -d --build
+#   docker compose -f ai-remediation/merge-gate/docker-compose.merge-gate.yml logs -f
+name: merge-gate
+
+services:
+  merge-gate:
+    build:
+      context: ..
+      dockerfile: merge-gate/Dockerfile
+    env_file: .env.mergegate
+    volumes:
+      - merge-gate-state:/state
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  merge-gate-state:

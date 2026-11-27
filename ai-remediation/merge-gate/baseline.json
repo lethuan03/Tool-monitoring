@@ -1,0 +1,74 @@
+{
+  "scenarios": [
+    {
+      "name": "Trang chủ, health và metrics không lộ ra ngoài",
+      "steps": [
+        {"name": "health", "request": {"method": "GET", "path": "/health"}, "expect": {"status": 200}},
+        {"name": "trang chủ", "request": {"method": "GET", "path": "/"}, "expect": {"status": 200, "body_contains": "<html"}},
+        {"name": "metrics bị chặn", "request": {"method": "GET", "path": "/metrics"}, "expect": {"status": 404}}
+      ]
+    },
+    {
+      "name": "Xem sản phẩm",
+      "steps": [
+        {"name": "danh sách", "request": {"method": "GET", "path": "/api/products"},
+         "expect": {"status": 200, "json": [{"path": "", "length_gte": 1}, {"path": "0.name", "exists": true}]},
+         "save": {"id": "0.id"}},
+        {"name": "chi tiết", "request": {"method": "GET", "path": "/api/products/${id}"},
+         "expect": {"status": 200, "json": [{"path": "id", "equals": "${id}"}]}},
+        {"name": "không tồn tại", "request": {"method": "GET", "path": "/api/products/999999999"}, "expect": {"status": 404}},
+        {"name": "id sai", "request": {"method": "GET", "path": "/api/products/abc"}, "expect": {"status": 404}}
+      ]
+    },
+    {
+      "name": "Đặt hàng trừ tồn kho",
+      "steps": [
+        {"name": "chọn sản phẩm", "setup": true, "request": {"method": "GET", "path": "/api/products"},
+         "expect": {"status": 200}, "save": {"id": "0.id"}},
+        {"name": "tồn kho trước", "setup": true, "request": {"method": "GET", "path": "/api/products/${id}"},
+         "expect": {"status": 200}, "save": {"stock": "stock"}},
+        {"name": "đặt 2", "request": {"method": "POST", "path": "/api/orders",
+          "json": {"customer": "Khach Thu", "email": "khach@example.com", "items": [{"productId": "${id}", "quantity": 2}]}},
+         "expect": {"status": 201, "json": [{"path": "id", "exists": true}, {"path": "items", "length": 1}]}},
+        {"name": "tồn kho giảm 2", "request": {"method": "GET", "path": "/api/products/${id}"},
+         "expect": {"status": 200, "json": [{"path": "stock", "equals": {"$var": "stock", "add": -2}}]}},
+        {"name": "thiếu thông tin", "request": {"method": "POST", "path": "/api/orders", "json": {"items": []}},
+         "expect": {"status": 400}},
+        {"name": "quá tồn kho", "request": {"method": "POST", "path": "/api/orders",
+          "json": {"customer": "Khach Thu", "email": "khach@example.com", "items": [{"productId": "${id}", "quantity": 1000000}]}},
+         "expect": {"status": 409}}
+      ]
+    },
+    {
+      "name": "Khách chưa đăng nhập không vào được phần quản trị",
+      "steps": [
+        {"name": "xem đơn", "request": {"method": "GET", "path": "/api/orders"}, "expect": {"status": 401}},
+        {"name": "thêm sản phẩm", "request": {"method": "POST", "path": "/api/products", "json": {"name": "x", "price": 1}},
+         "expect": {"status": 401}},
+        {"name": "trang admin", "request": {"method": "GET", "path": "/admin.html"}, "expect": {"status": 302}},
+        {"name": "đăng nhập sai", "request": {"method": "POST", "path": "/api/auth/login",
+          "json": {"username": "${admin_username}", "password": "sai-mat-khau-${unique}"}},
+         "expect": {"status": 401}}
+      ]
+    },
+    {
+      "name": "Admin đăng nhập, quản lý sản phẩm, đăng xuất",
+      "steps": [
+        {"name": "đăng nhập", "request": {"method": "POST", "path": "/api/auth/login",
+          "json": {"username": "${admin_username}", "password": "${admin_password}"}},
+         "expect": {"status": 200, "json": [{"path": "role", "equals": "admin"}]}},
+        {"name": "thêm", "request": {"method": "POST", "path": "/api/products",
+          "json": {"name": "SP thu ${unique}", "price": 1000, "stock": 5}},
+         "expect": {"status": 201, "json": [{"path": "stock", "equals": 5}]}, "save": {"newId": "id"}},
+        {"name": "sửa", "request": {"method": "PUT", "path": "/api/products/${newId}",
+          "json": {"name": "SP da sua ${unique}", "price": 2000, "stock": 7}},
+         "expect": {"status": 200, "json": [{"path": "price", "equals": 2000}, {"path": "stock", "equals": 7}]}},
+        {"name": "xoá", "request": {"method": "DELETE", "path": "/api/products/${newId}"}, "expect": {"status": 204}},
+        {"name": "đã xoá", "request": {"method": "GET", "path": "/api/products/${newId}"}, "expect": {"status": 404}},
+        {"name": "xem đơn", "request": {"method": "GET", "path": "/api/orders"}, "expect": {"status": 200}},
+        {"name": "đăng xuất", "request": {"method": "POST", "path": "/api/auth/logout"}, "expect": {"status": 204}},
+        {"name": "hết quyền", "request": {"method": "GET", "path": "/api/orders"}, "expect": {"status": 401}}
+      ]
+    }
+  ]
+}
