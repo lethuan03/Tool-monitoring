@@ -10,6 +10,7 @@ Biến môi trường:
     GITHUB_TOKEN        bắt buộc, fine-grained token quyền "Actions: Read-only"
     CI_LOG_DIR          mặc định: thư mục data/ cạnh file này
     CI_LOG_DAYS         chỉ lấy lần chạy tạo trong N ngày gần đây (mặc định 5)
+    CI_LOG_KEEP_DAYS    tự xoá log đã tải quá N ngày (mặc định 14, 0 = không xoá; tối thiểu CI_LOG_DAYS + 1)
     CI_LOG_CONCLUSIONS  kết quả job cần lấy, cách nhau dấu phẩy (mặc định failure)
     GITHUB_API_URL      mặc định https://api.github.com (đổi khi test)
 
@@ -51,6 +52,12 @@ def load_config(env):
         raise ConfigError("CI_LOG_DAYS phải là số nguyên") from None
     if days < 1:
         raise ConfigError("CI_LOG_DAYS phải >= 1")
+    try:
+        keep = int(env.get("CI_LOG_KEEP_DAYS") or 14)
+    except ValueError:
+        raise ConfigError("CI_LOG_KEEP_DAYS phải là số nguyên") from None
+    if keep < 0:
+        raise ConfigError("CI_LOG_KEEP_DAYS phải >= 0")
     wanted = {c.strip() for c in (env.get("CI_LOG_CONCLUSIONS") or "failure").split(",") if c.strip()}
     if not wanted:
         raise ConfigError("CI_LOG_CONCLUSIONS không có giá trị nào")
@@ -58,6 +65,8 @@ def load_config(env):
         "repo": repo,
         "token": token,
         "days": days,
+        # giữ lâu hơn khoảng tải, nếu không log vừa xoá sẽ bị tải lại
+        "keep_days": max(keep, days + 1) if keep else 0,
         "conclusions": wanted,
         "out_dir": env.get("CI_LOG_DIR") or os.path.join(HERE, "data"),
         "api": (env.get("GITHUB_API_URL") or "https://api.github.com").rstrip("/"),
@@ -95,6 +104,31 @@ def write_file(path, text):
     os.replace(tmp, path)
 
 
+def cleanup(cfg, now=None):
+    """Xoá log đã tải quá cfg["keep_days"] ngày. Trả số file đã xoá.
+
+    Chỉ đụng đúng thứ do tool này tạo: <số>/<số>.log|.json (và file .tmp dở). Thứ khác trong thư mục để nguyên.
+    """
+    if not cfg["keep_days"] or not os.path.isdir(cfg["out_dir"]):
+        return 0
+    limit = (time.time() if now is None else now) - cfg["keep_days"] * 86400
+    removed = 0
+    with os.scandir(cfg["out_dir"]) as runs:
+        folders = [r.path for r in runs if r.name.isdigit() and r.is_dir(follow_symlinks=False)]
+    for folder in folders:
+        with os.scandir(folder) as files:
+            old = [f.path for f in files if re.fullmatch(r"\d+\.(log|json)(\.tmp)?", f.name)
+                   and f.is_file(follow_symlinks=False) and f.stat(follow_symlinks=False).st_mtime < limit]
+        for path in old:
+            os.remove(path)
+        removed += len(old)
+        if old and not os.listdir(folder):
+            os.rmdir(folder)
+    if removed:
+        print(f"Đã xoá {removed} file log cũ hơn {cfg['keep_days']} ngày")
+    return removed
+
+
 def job_meta(cfg, run, job):
     return {
         "repo": cfg["repo"],
@@ -115,8 +149,12 @@ def job_meta(cfg, run, job):
     }
 
 
-def fetch(cfg, now=None):
-    """Tải log còn thiếu. Trả (danh sách file .log mới, số lỗi)."""
+def fetch(cfg, now=None, seen=None):
+    """Tải log còn thiếu. Trả (danh sách file .log mới, số lỗi).
+
+    cfg["workflow"] (tuỳ chọn): chỉ lấy lần chạy của file workflow này.
+    seen (tuỳ chọn): tập các lần chạy đã lấy đủ, để người gọi lặp lại khỏi hỏi GitHub lần nữa.
+    """
     now = time.time() if now is None else now
     since = time.strftime("%Y-%m-%d", time.gmtime(now - cfg["days"] * 86400))
     runs = github_list(cfg, "/actions/runs", "workflow_runs", {"status": "completed", "created": f">={since}"})
@@ -126,7 +164,13 @@ def fetch(cfg, now=None):
         # Lần chạy xanh không có job fail -> khỏi hỏi danh sách job (đỡ tốn lượt gọi API)
         if run.get("conclusion") == "success" and "success" not in cfg["conclusions"]:
             continue
+        if cfg.get("workflow") and run.get("path", "").split("@")[0] != cfg["workflow"]:
+            continue
         run_id = int(run["id"])  # ép số: id dùng làm tên thư mục/file
+        attempt = (run_id, run.get("run_attempt"))  # chạy lại job hỏng = cùng id, lần thử mới
+        if seen is not None and attempt in seen:
+            continue
+        errors_before = errors
         try:
             jobs = github_list(cfg, f"/actions/runs/{run_id}/jobs", "jobs", {})
         except NETWORK_ERRORS as e:
@@ -152,6 +196,8 @@ def fetch(cfg, now=None):
             write_file(base + ".log", text)
             saved.append(base + ".log")
             print(f"Đã lưu: {job.get('name')} -> {base}.log")
+        if seen is not None and errors == errors_before:
+            seen.add(attempt)
     return saved, errors
 
 
@@ -161,6 +207,7 @@ def main(env=None):
             stream.reconfigure(encoding="utf-8", errors="replace")
     try:
         cfg = load_config(os.environ if env is None else env)
+        cleanup(cfg)
         saved, errors = fetch(cfg)
     except ConfigError as e:
         print(f"Sai cấu hình: {e}", file=sys.stderr)

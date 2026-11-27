@@ -134,6 +134,60 @@ class FetchTest(unittest.TestCase):
         self.assertTrue(os.path.exists(self.path("1", "13.log")))
         self.assertNotIn("token-bi-mat", out)
 
+    def test_workflow_filter_and_seen_runs_skipped(self):
+        self.server.runs = [{**run(1), "path": ".github/workflows/ci.yml"},
+                            {**run(3), "path": ".github/workflows/ai-test.yml"}]
+        self.server.jobs[3] = [job(31)]
+        cfg = {**fetch_logs.load_config(self.env), "workflow": ".github/workflows/ci.yml"}
+        seen = set()
+        with contextlib.redirect_stdout(io.StringIO()):
+            fetch_logs.fetch(cfg, seen=seen)
+            self.server.requests.clear()
+            fetch_logs.fetch(cfg, seen=seen)
+        self.assertTrue(os.path.exists(self.path("1", "11.log")))
+        self.assertFalse(os.path.exists(self.path("3")))
+        self.assertEqual(self.paths_called(), ["/repos/me/shop/actions/runs"])  # không hỏi lại job
+
+    def test_run_with_error_is_retried(self):
+        self.server.broken = {11}
+        cfg, seen = fetch_logs.load_config(self.env), set()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            fetch_logs.fetch(cfg, seen=seen)
+            self.server.broken = set()
+            fetch_logs.fetch(cfg, seen=seen)
+        self.assertTrue(os.path.exists(self.path("1", "11.log")))
+
+    def test_cleanup_removes_only_old_files_made_by_this_tool(self):
+        now = 100 * 86400
+        files = {("1", "11.log"): 20, ("1", "11.json"): 20, ("2", "21.log"): 20, ("2", "ghi-chu.txt"): 20,
+                 ("3", "31.log"): 1, ("khac", "1.log"): 20, ("4", "41.log.tmp"): 20}
+        for parts, age in files.items():
+            os.makedirs(self.path(parts[0]), exist_ok=True)
+            with open(self.path(*parts), "w") as f:
+                f.write("x")
+            os.utime(self.path(*parts), (now - age * 86400,) * 2)
+        os.makedirs(self.path("5"))  # thư mục rỗng không do lần dọn này làm rỗng
+        cfg = fetch_logs.load_config(self.env)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(fetch_logs.cleanup(cfg, now=now), 4)
+        self.assertEqual(sorted(os.listdir(self.tmp.name)), ["2", "3", "5", "khac"])
+        self.assertEqual(os.listdir(self.path("2")), ["ghi-chu.txt"])
+        self.assertEqual(os.listdir(self.path("khac")), ["1.log"])
+
+    def test_keep_days_setting(self):
+        for env, expected in (({}, 14), ({"CI_LOG_KEEP_DAYS": "0"}, 0), ({"CI_LOG_KEEP_DAYS": "2"}, 6),
+                              ({"CI_LOG_DAYS": "30"}, 31)):
+            with self.subTest(env=env):
+                self.assertEqual(fetch_logs.load_config({**self.env, **env})["keep_days"], expected)
+        for bad in ("-1", "x"):
+            with self.subTest(bad=bad), self.assertRaises(fetch_logs.ConfigError):
+                fetch_logs.load_config({**self.env, "CI_LOG_KEEP_DAYS": bad})
+        os.makedirs(self.path("1"))
+        with open(self.path("1", "11.log"), "w") as f:
+            f.write("x")
+        os.utime(self.path("1", "11.log"), (0, 0))
+        self.assertEqual(fetch_logs.cleanup(fetch_logs.load_config({**self.env, "CI_LOG_KEEP_DAYS": "0"})), 0)
+
     def test_reads_all_pages(self):
         self.server.runs = [run(i, "success") for i in range(100, 200)] + [run(1)]
         self.main()

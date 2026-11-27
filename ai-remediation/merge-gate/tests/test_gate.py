@@ -10,6 +10,7 @@ import unittest
 import urllib.error
 import urllib.parse
 import zipfile
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
@@ -748,6 +749,32 @@ class SafetyTest(Base):
         g.tick()
         self.assertIn("ĐẠT", self.last())
         self.assertEqual(len(self.model.calls), 2)
+
+
+class CiLogTest(Base):
+    def test_off_unless_log_dir_is_set(self):
+        with mock.patch("fetch_logs.fetch") as fetch:
+            self.make().tick()
+        fetch.assert_not_called()
+
+    def test_pulls_only_ci_logs_without_ai_or_message(self):
+        self.env["CI_LOG_DIR"] = self.tmp.name
+        with mock.patch("fetch_logs.fetch") as fetch:
+            g = self.make()
+            g.tick()
+            count = len(self.tg.sent)
+            g.tick()
+        cfg = fetch.call_args.args[0]
+        self.assertEqual((cfg["out_dir"], cfg["workflow"], cfg["conclusions"]),
+                         (self.tmp.name, gate.CI_WORKFLOW, {"failure"}))
+        self.assertIs(fetch.call_args.kwargs["seen"], g.logged_runs)
+        self.assertEqual((len(self.tg.sent), self.model.calls, self.gh.writes), (count, [], []))
+
+    def test_log_error_does_not_stop_the_gate(self):
+        self.env["CI_LOG_DIR"] = self.tmp.name
+        with mock.patch("fetch_logs.fetch", side_effect=PermissionError()):
+            self.offer()
+        self.assertEqual(self.kinds(), ["t", "x"])
 
 
 class ChatTest(Base):

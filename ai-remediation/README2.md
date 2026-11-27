@@ -457,6 +457,8 @@ Giới hạn của sandbox: không kiểm tra Telegram/Bedrock thật (**chất 
 
 Bước 1 của luồng "AI phân tích lỗi CI". **Mới chỉ tải log**; lớp filter và phần AI phân tích/báo lỗi chưa làm.
 
+**Tự động:** khi merge-gate (mục 11) đang chạy, mỗi vòng nó tải log của **job CI hỏng** (mọi nhánh, kể cả chưa mở PR; chỉ workflow `ci.yml`, không lấy `ai-test`) vào `ci-logs/data/`. Không gọi AI, không nhắn Telegram, dùng chung `GATE_GITHUB_TOKEN`. Lần chạy đầu lấy cả log hỏng trong 5 ngày gần đây (`CI_LOG_DAYS`). Bot tắt thì không tải; bật lại sẽ tải bù trong khoảng ngày đó. Phần dưới là cách chạy tay.
+
 ```
 GitHub Actions ──(fetch_logs.py hỏi, chỉ đọc)──> data/<run_id>/<job_id>.log + .json ──> [filter: chưa làm] ──> [AI: chưa làm]
 ```
@@ -464,7 +466,8 @@ GitHub Actions ──(fetch_logs.py hỏi, chỉ đọc)──> data/<run_id>/<j
 - `fetch_logs.py` (chỉ thư viện chuẩn Python) lấy các lần chạy đã xong trong `CI_LOG_DAYS` ngày, tải log của job có kết quả thuộc `CI_LOG_CONCLUSIONS` (mặc định `failure`). Job đã có file `.log` thì bỏ qua.
 - File `.log` là **log thô**, chưa lọc, chưa che bí mật. Thư mục `data/` đã chặn trong `.gitignore`.
 - File `.json` cạnh đó: workflow, tên job, step lỗi, nhánh, commit, link, `head_repo` (khác `repo` = PR từ fork).
-- Chưa nằm trong image/compose nào: chạy tay hoặc bằng cron. Chưa tự xoá log cũ.
+- Chạy cùng merge-gate (thư mục gắn vào container bằng `docker-compose.merge-gate.yml`), hoặc chạy tay/cron.
+- **Dọn dẹp:** mỗi vòng (và mỗi lần chạy tay), file log tải quá `CI_LOG_KEEP_DAYS` ngày bị xoá, thư mục rỗng do vậy cũng xoá. Chỉ xoá đúng dạng `<số>/<số>.log|.json|.tmp`; file khác bạn để trong `data/` được giữ nguyên. Trên Linux, user `10003` trong container cần quyền ghi vào `ci-logs/data/`.
 
 | Biến môi trường | Mặc định | Ý nghĩa |
 |---|---|---|
@@ -472,6 +475,7 @@ GitHub Actions ──(fetch_logs.py hỏi, chỉ đọc)──> data/<run_id>/<j
 | `GITHUB_TOKEN` | (bắt buộc) | Fine-grained token, chỉ repo này, quyền **Actions: Read-only** |
 | `CI_LOG_DIR` | `ai-remediation/ci-logs/data` | Nơi lưu log |
 | `CI_LOG_DAYS` | `5` | Lấy lần chạy tạo trong N ngày gần đây |
+| `CI_LOG_KEEP_DAYS` | `14` | Xoá log đã tải quá N ngày; `0` = không xoá; nhỏ hơn `CI_LOG_DAYS + 1` thì tự nâng lên |
 | `CI_LOG_CONCLUSIONS` | `failure` | Kết quả job cần lấy, cách nhau dấu phẩy |
 | `GITHUB_API_URL` | `https://api.github.com` | Chỉ đổi khi test (token được gửi tới địa chỉ này) |
 
@@ -485,7 +489,7 @@ python ai-remediation/ci-logs/fetch_logs.py
 
 Test (GitHub giả trên 127.0.0.1): `python -m unittest discover -s ai-remediation/ci-logs/tests`
 
-**Chưa chạy thử với GitHub thật.**
+Chạy tay đã thử với GitHub thật. Phần tự kéo trong merge-gate mới có unit test.
 
 **Lưu ý cho bước sau:** log CI là nội dung không đáng tin (người gửi PR có thể in chữ gài lệnh cho AI) và có thể chứa bí mật. Trước khi đưa cho AI phải qua lớp filter (cắt đoạn lỗi, che token/mật khẩu), AI phân tích không được dùng công cụ nào.
 

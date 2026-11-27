@@ -14,6 +14,7 @@ import fnmatch
 import hashlib
 import hmac
 import html
+import http.client
 import io
 import json
 import logging
@@ -80,11 +81,16 @@ def load_config(env):
     try:
         github = fetch_logs.load_config({"GITHUB_REPO": env.get("GITHUB_REPO", ""),
                                          "GITHUB_TOKEN": clean("GATE_GITHUB_TOKEN"),
-                                         "GITHUB_API_URL": env.get("GITHUB_API_URL", "")})
+                                         "GITHUB_API_URL": env.get("GITHUB_API_URL", ""),
+                                         "CI_LOG_DIR": env.get("CI_LOG_DIR", ""),
+                                         "CI_LOG_DAYS": env.get("CI_LOG_DAYS", ""),
+                                         "CI_LOG_KEEP_DAYS": env.get("CI_LOG_KEEP_DAYS", "")})
     except fetch_logs.ConfigError as e:
         raise ConfigError(str(e).replace("GITHUB_TOKEN", "GATE_GITHUB_TOKEN")) from None
+    github["workflow"] = CI_WORKFLOW  # chỉ kéo log của CI, không lấy log chạy thử ai-test
     cfg = {
         "github": github,
+        "ci_logs": bool(env.get("CI_LOG_DIR")),
         "repo": github["repo"],
         "base": env.get("GATE_BASE_BRANCH") or "main",
         "mode": "execute" if clean("GATE_MODE").lower() == "execute" else "dry-run",
@@ -268,6 +274,7 @@ class Gate(chat.ChatMixin):
         if not self.state["secret"]:
             self.state["secret"] = secrets.token_hex(32)
         self.secret = (cfg["secret"] or self.state["secret"]).encode()
+        self.logged_runs = set()  # lần chạy CI đã kéo đủ log (chỉ nhớ trong phiên chạy)
 
     def save(self):
         folder = os.path.dirname(os.path.abspath(self.cfg["state_file"]))
@@ -344,8 +351,19 @@ class Gate(chat.ChatMixin):
         self.expire_pending()
         self.sync_branches()
         self.save_merged()
+        self.pull_ci_logs()
         for name in list(self.state["branches"]):
             self.advance(name)
+
+    def pull_ci_logs(self):
+        """CI hỏng -> tải log THÔ của job hỏng về đĩa, xoá log quá hạn (chỉ đọc GitHub, không AI, không nhắn tin)."""
+        if not self.cfg["ci_logs"]:
+            return
+        try:
+            fetch_logs.cleanup(self.cfg["github"], now=self.clock())
+            fetch_logs.fetch(self.cfg["github"], now=self.clock(), seen=self.logged_runs)
+        except (OSError, ValueError, KeyError, http.client.HTTPException) as e:  # không được làm hỏng việc kiểm
+            log.warning("Không kéo được log CI: %s", type(e).__name__)
 
     def advance(self, name):
         """Đẩy 1 nhánh đi qua các bước cho tới khi phải chờ."""
