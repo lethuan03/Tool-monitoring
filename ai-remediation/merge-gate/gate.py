@@ -1,11 +1,12 @@
-"""merge-gate: mọi code muốn vào main phải qua CI + AI chạy thử chức năng + người duyệt trên Telegram.
+"""merge-gate: mọi code muốn vào main phải qua CI + chạy thử chức năng + người duyệt trên Telegram.
 
-Chạy trên máy local (1 container, không mở cổng, 1 luồng). Mỗi vòng:
-  nhánh có commit mới -> CI xanh -> kiểm tra cứng -> AI soạn kịch bản -> workflow ai-test chạy trên GitHub
-  -> AI đánh giá -> Telegram [duyệt/từ chối] -> tạo PR -> CI của PR xanh -> merge đúng commit đã kiểm.
+Chạy trên máy local (1 container, không mở cổng, 1 luồng). Mỗi nhánh có commit mới:
+  CI xanh -> kiểm tra cứng + khoanh vùng -> XIN PHÉP KIỂM -> AI soạn kịch bản -> workflow ai-test trên GitHub
+  -> AI đánh giá -> XIN PHÉP MERGE -> tạo PR -> CI của PR xanh -> merge đúng commit đã kiểm.
+Gọi AI, chạy workflow, tạo PR, merge đều chỉ xảy ra sau khi người được phép bấm nút.
 
 Mặc định an toàn: GATE_AI=off (không gọi Bedrock) và GATE_MODE=dry-run (không gắn status, không tạo PR, không merge;
-vẫn kích hoạt workflow chạy thử). Biến môi trường: xem .env.mergegate.example và README2.md mục 11.
+đã được cho phép thì vẫn kích hoạt workflow chạy thử). Biến môi trường: xem .env.mergegate.example và README2.md mục 11.
 """
 import base64
 import fnmatch
@@ -29,7 +30,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.append(os.path.join(os.path.dirname(HERE), "ci-logs"))  # trong image, fetch_logs.py nằm cạnh file này
 import ai  # noqa: E402
+import chat  # noqa: E402
 import fetch_logs  # noqa: E402
+import runner  # noqa: E402
+import scope as scoping  # noqa: E402
+import views  # noqa: E402
+from views import esc  # noqa: E402
 
 log = logging.getLogger("merge-gate")
 
@@ -44,6 +50,7 @@ PR_TIMEOUT = 1200
 APPROVAL_TTL = 86400
 MAX_ERRORS = 10
 MAX_SCENARIO_INPUT = 60000  # giới hạn input của workflow_dispatch khoảng 65 535 ký tự
+MAX_SAVED = 100
 
 # Sửa các đường dẫn này = có thể đổi chính cách kiểm tra -> không bao giờ tự merge
 PROTECTED = (".github/*", "ai-remediation/merge-gate/*", "ai-remediation/ci-logs/*",
@@ -83,6 +90,8 @@ def load_config(env):
         "poll": max(15, number("GATE_POLL_SECONDS", 60)),
         "quiet": max(0, number("GATE_QUIET_SECONDS", 120)),
         "max_reviews": max(0, number("GATE_MAX_REVIEWS_PER_DAY", 10)),
+        "max_chats": max(0, number("GATE_MAX_CHATS_PER_DAY", 30)),
+        "max_retests": max(0, number("GATE_MAX_RETESTS", 2)),
         "ignore": [p.strip() for p in (env.get("GATE_IGNORE_BRANCHES") or "backup/*,test/*").split(",") if p.strip()],
         "diff_max": max(1000, number("GATE_DIFF_MAX_CHARS", 60000)),
         "context_max": max(0, number("GATE_CONTEXT_MAX_CHARS", 60000)),
@@ -137,8 +146,8 @@ class GitHub:
 
 # ---------------------------------------------------------------- Telegram
 class Telegram:
-    def __init__(self, token, chat, api):
-        self.token, self.chat, self.api = token, chat, api
+    def __init__(self, token, chat_id, api):
+        self.token, self.chat, self.api = token, chat_id, api
 
     def call(self, method, body, timeout=40):
         req = urllib.request.Request(f"{self.api}/bot{self.token}/{method}", data=json.dumps(body).encode(),
@@ -152,11 +161,17 @@ class Telegram:
             log.error("Telegram %s lỗi mạng: %s", method, type(e).__name__)
         return None
 
-    def send(self, text, buttons=None):
+    def _message(self, text, buttons):
         body = {"chat_id": self.chat, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
         if buttons:
-            body["reply_markup"] = {"inline_keyboard": [buttons]}
-        return (self.call("sendMessage", body, timeout=20) or {}).get("message_id")
+            body["reply_markup"] = {"inline_keyboard": [buttons[i:i + 2] for i in range(0, len(buttons), 2)]}
+        return body
+
+    def send(self, text, buttons=None):
+        return (self.call("sendMessage", self._message(text, buttons), timeout=20) or {}).get("message_id")
+
+    def edit(self, message_id, text):
+        self.call("editMessageText", {**self._message(text, None), "message_id": message_id}, timeout=15)
 
     def clear_buttons(self, message_id):
         self.call("editMessageReplyMarkup", {"chat_id": self.chat, "message_id": message_id,
@@ -166,12 +181,8 @@ class Telegram:
         self.call("answerCallbackQuery", {"callback_query_id": callback_id, "text": text[:190]}, timeout=15)
 
     def updates(self, offset, timeout):
-        return self.call("getUpdates", {"offset": offset, "timeout": timeout, "allowed_updates": ["callback_query"]},
-                         timeout=timeout + 15)
-
-
-def esc(s):
-    return html.escape(str(s or ""), quote=False)
+        return self.call("getUpdates", {"offset": offset, "timeout": timeout,
+                                        "allowed_updates": ["callback_query", "message"]}, timeout=timeout + 15)
 
 
 # ---------------------------------------------------------------- kiểm tra cứng (không dùng AI)
@@ -211,6 +222,8 @@ def inspect(files, diff_max):
         size += len(patch or "")
         if status == "removed" and re.search(r"(^|/)tests?/|\.test\.|(^|/)test_", path):
             warnings.append(f"xoá file test: {path}")
+        if path.startswith(scoping.FEATURE_DIR) or old.startswith(scoping.FEATURE_DIR):
+            warnings.append(f"nhánh sửa mô tả chức năng (chuẩn chấm), hãy đọc kỹ: {path}")
 
     def short(paths):
         return ", ".join(paths[:4]) + (f" và {len(paths) - 4} file khác" if len(paths) > 4 else "")
@@ -235,11 +248,16 @@ def build_diff(files, limit):
     return text if len(text) <= limit else text[:limit] + "\n(... bị cắt vì quá dài)"
 
 
+def saved_key(scenario):
+    return hashlib.sha256(json.dumps(scenario["steps"], sort_keys=True).encode()).hexdigest()[:16]
+
+
 # ---------------------------------------------------------------- cổng
-class Gate:
+class Gate(chat.ChatMixin):
     def __init__(self, cfg, github, telegram, model=None, clock=time.time):
         self.cfg, self.gh, self.tg, self.model, self.clock = cfg, github, telegram, model, clock
-        self.state = {"initialized": False, "branches": {}, "pending": {}, "reviews": [], "secret": ""}
+        self.state = {"initialized": False, "branches": {}, "pending": {}, "reviews": [], "chat_calls": [],
+                      "saved": [], "session": None, "secret": ""}
         if os.path.exists(cfg["state_file"]):
             with open(cfg["state_file"], encoding="utf-8") as f:
                 self.state.update(json.load(f))
@@ -260,13 +278,13 @@ class Gate:
         heads = {b["name"]: b["commit"]["sha"] for b in self.gh.pages("/branches")}
         branches, now = self.state["branches"], self.clock()
         if not self.state["initialized"]:
-            # lần đầu: chỉ ghi nhận, không review nhánh cũ (tránh tốn phí hàng loạt)
+            # lần đầu: chỉ ghi nhận, không hỏi về nhánh cũ
             for name, sha in heads.items():
                 if not self.ignored(name):
                     branches[name] = {"sha": sha, "stage": "baseline", "seen_at": now}
             self.state["initialized"] = True
             self.tg.send(f"🚦 <b>merge-gate</b> đã chạy ({esc(self.cfg['mode'])}, AI: {esc(self.cfg['ai'])}). "
-                         f"Ghi nhận {len(branches)} nhánh hiện có, chỉ kiểm commit mới từ bây giờ.")
+                         f"Ghi nhận {len(branches)} nhánh hiện có, chỉ kiểm commit mới từ bây giờ. /help")
         else:
             for name in [n for n in branches if n not in heads or self.ignored(n)]:
                 self.drop_pending(name)
@@ -328,6 +346,30 @@ class Gate:
         rec["decision"] = {"outcome": outcome, "reasons": list(reasons)}
         rec["stage"] = "report"
 
+    def progress(self, name, rec, current):
+        """Một tin duy nhất, sửa dần theo tiến trình. Lỗi gửi không được làm hỏng luồng kiểm."""
+        text = views.progress(name, rec, current, self.cfg["ai"] != "off")
+        if rec.get("progress_id"):
+            self.tg.edit(rec["progress_id"], text)
+        else:
+            rec["progress_id"] = self.tg.send(text)
+
+    # ------------------------------------------------ nút bấm
+    def sign(self, pid, kind):
+        return hmac.new(self.secret, f"{kind}:{pid}".encode(), hashlib.sha256).hexdigest()[:16]
+
+    def send_card(self, name, rec, text, buttons, **extra):
+        """Gửi tin kèm nút và ghi lại yêu cầu chờ duyệt. buttons = [(loại, nhãn)]. Trả False nếu không gửi được."""
+        pid = secrets.token_hex(6)
+        markup = [{"text": label, "callback_data": f"{kind}:{pid}:{self.sign(pid, kind)}"} for kind, label in buttons]
+        message_id = self.tg.send(text, markup)
+        if message_id is None:
+            return False
+        self.drop_pending(name)
+        self.state["pending"][pid] = {"branch": name, "sha": rec["sha"], "kinds": [k for k, _ in buttons],
+                                      "message_id": message_id, "expires": self.clock() + APPROVAL_TTL, **extra}
+        return True
+
     # ------------------------------------------------ các bước
     def ci_state(self, sha, branch, event):
         """(missing | running | failed | success, link)."""
@@ -353,6 +395,9 @@ class Gate:
         base = urllib.parse.quote(self.cfg["base"], safe="")
         return self.gh.get(f"/compare/{base}...{sha}")
 
+    def diff_of(self, sha):
+        return build_diff(self.compare(sha).get("files", []), self.cfg["diff_max"])
+
     def stage_new(self, name, rec):
         waited = self.clock() - rec["seen_at"]
         if waited < self.cfg["quiet"]:
@@ -364,70 +409,117 @@ class Gate:
                 raise
             return self.finish(rec, "error", f"không so sánh được với {self.cfg['base']} (không chung lịch sử?)")
         if not cmp_.get("ahead_by") or not cmp_.get("files"):
-            rec["stage"] = "done"  # không đổi file nào so với main (vd chỉ gộp main vào nhánh) -> không tốn lượt AI
+            rec["stage"] = "done"  # không đổi file nào so với main (vd chỉ gộp main vào nhánh)
             return
         rec["title"] = cmp_["commits"][-1]["commit"]["message"].splitlines()[0][:150] if cmp_.get("commits") else ""
         status, url = self.ci_state(rec["sha"], name, "push")
         rec["ci_url"] = url
         if status == "failed":
             return self.finish(rec, "fail", "CI không đạt")
-        if status == "missing" and waited > CI_MISSING_AFTER:
-            return self.finish(rec, "error", "không thấy CI chạy cho commit này")
+        if status == "missing" and (waited > CI_MISSING_AFTER or rec.get("requested")):
+            return self.finish(rec, "error", "không thấy CI chạy cho commit này (nhánh cũ thì gộp main vào rồi push)")
         if status == "success":
-            rec["stage"] = "plan"
+            rec["stage"] = "ask"
 
-    def file_context(self, sha, changed):
-        tree = self.gh.get(f"/git/trees/{sha}", recursive="1")["tree"]
-        wanted = [t["path"] for t in tree if t.get("type") == "blob" and (
-            t["path"].startswith("webapp/backend/src/") or t["path"] == "webapp/nginx/snippets/app-locations.conf")]
-        wanted.sort(key=lambda p: (p not in changed, not p.endswith("server.js"), "/routes/" not in p, p))
+    def read_file(self, path, ref):
+        data = self.gh.get(f"/contents/{urllib.parse.quote(path)}", ref=ref)
+        return base64.b64decode(data.get("content", "")).decode("utf-8", "replace")
+
+    def tree(self, ref):
+        return [t["path"] for t in self.gh.get(f"/git/trees/{ref}", recursive="1")["tree"] if t.get("type") == "blob"]
+
+    def stage_ask(self, name, rec):
+        """Kiểm tra cứng và khoanh vùng (không tốn phí) rồi XIN PHÉP kiểm."""
+        cmp_ = self.compare(rec["sha"])
+        files = cmp_.get("files", [])
+        findings = inspect(files, self.cfg["diff_max"])
+        rec.update(base_sha=cmp_.get("base_commit", {}).get("sha"), manual=findings["manual"],
+                   warnings=findings["warnings"], testable=findings["testable"],
+                   changed=[f["filename"] for f in files][:60])
+        if findings["blocked"]:
+            return self.finish(rec, "blocked", *findings["blocked"][:6])
+        sources = {p: self.read_file(p, rec["sha"]) for p in self.tree(rec["sha"])
+                   if p.startswith(scoping.SRC) and p.endswith(".js")}
+        # mô tả chức năng lấy ở MAIN: nhánh được kiểm không tự đổi được chuẩn chấm
+        docs = {p: self.read_file(p, rec["base_sha"] or self.cfg["base"])
+                for p in self.tree(rec["base_sha"] or self.cfg["base"])
+                if p.startswith(scoping.FEATURE_DIR) and p.endswith(".md")}
+        rec["scope"] = scoping.analyze(files, sources, docs)
+        used = len([t for t in self.state["reviews"] if self.clock() - t < 86400])
+        text = views.test_card(name, rec, self.cfg["ai"] != "off", len(self.pick_saved(rec, 20)), used, self.cfg["max_reviews"])
+        if not self.send_card(name, rec, text, [("t", "✅ Cho phép kiểm"), ("x", "❌ Bỏ qua")]):
+            raise RuntimeError("không gửi được tin Telegram")
+        rec["stage"] = "awaiting_test"
+
+    def context(self, rec):
+        """Chỉ những gì liên quan tới thay đổi (theo scope đã khoanh)."""
+        cmp_ = self.compare(rec["sha"])
+        base = rec.get("base_sha") or self.cfg["base"]
+        wanted = rec["scope"]["files"]
+        existing = set(self.tree(rec["sha"]))
         files, used = {}, 0
         for path in wanted:
-            data = self.gh.get(f"/contents/{urllib.parse.quote(path)}", ref=sha)
-            text = base64.b64decode(data.get("content", "")).decode("utf-8", "replace")
+            if path not in existing:
+                continue
+            text = self.read_file(path, rec["sha"])
             if used + len(text) > self.cfg["context_max"]:
                 continue
             files[path] = text
             used += len(text)
-        return files
-
-    def context(self, rec, with_files=True):
-        cmp_ = self.compare(rec["sha"])
-        files = cmp_.get("files", [])
+        features = {}
+        for path in self.tree(base):
+            if path.startswith(scoping.FEATURE_DIR) and path.endswith(".md"):
+                text = self.read_file(path, base)
+                if scoping.parse_features({path: text})[0]["name"] in rec["scope"]["features"]:
+                    features[path] = text[:8000]
         return {
             "commits": [c["commit"]["message"][:1000] for c in cmp_.get("commits", [])][-20:],
-            "diff": build_diff(files, self.cfg["diff_max"]),
-            "files": self.file_context(rec["sha"], {f["filename"] for f in files}) if with_files else {},
+            "diff": build_diff(cmp_.get("files", []), self.cfg["diff_max"]),
+            "files": files, "features": features, "endpoints": rec["scope"]["endpoints"],
         }
 
+    def pick_saved(self, rec, room):
+        """Kịch bản đã lưu thuộc chức năng bị ảnh hưởng, mới nhất trước."""
+        scope = rec.get("scope") or {"wide": True, "features": []}
+        wanted = set(scope["features"])
+        picked = []
+        for entry in reversed(self.state["saved"]):
+            related = scope["wide"] or not entry["features"] or wanted & set(entry["features"])
+            if related and len(picked) < room:
+                picked.append({"name": f"[cũ] {entry['scenario']['name']}"[:190], "source": "saved",
+                               "steps": entry["scenario"]["steps"]})
+        return picked
+
     def stage_plan(self, name, rec):
-        cmp_ = self.compare(rec["sha"])
-        findings = inspect(cmp_.get("files", []), self.cfg["diff_max"])
-        rec.update(base_sha=cmp_.get("base_commit", {}).get("sha"), manual=findings["manual"],
-                   warnings=findings["warnings"], testable=findings["testable"])
-        if findings["blocked"]:
-            return self.finish(rec, "blocked", *findings["blocked"][:6])
         plan = {"understanding": "", "requirement_clear": False, "scenarios": [], "untestable": []}
         if self.cfg["ai"] != "off":
             now = self.clock()
             self.state["reviews"] = [t for t in self.state["reviews"] if now - t < 86400]
             if len(self.state["reviews"]) >= self.cfg["max_reviews"]:
-                if not rec.get("limit_notified"):
-                    rec["limit_notified"] = bool(self.tg.send(
-                        f"⏸ <b>{esc(name)}</b>: đã hết {self.cfg['max_reviews']} lượt AI trong 24 giờ, sẽ kiểm sau."))
-                return
+                return self.finish(rec, "error", f"đã hết {self.cfg['max_reviews']} lần kiểm bằng AI trong 24 giờ")
+            self.progress(name, rec, "plan")
             ctx = self.context(rec)
             self.state["reviews"].append(now)  # tính lượt TRƯỚC khi gọi: lỗi cũng đã tốn phí
             self.save()
             try:
-                plan = ai.generate(self.model, ctx)
+                plan = ai.generate(self.model, ctx, rec.get("notes", ""), rec.get("previous_errors"))
             except ai.AIError as e:
                 return self.finish(rec, "error", str(e))
-        if len(json.dumps({"scenarios": plan["scenarios"]}, ensure_ascii=False)) > MAX_SCENARIO_INPUT:
+        to_run = plan["scenarios"] + self.pick_saved(rec, runner.MAX_SCENARIOS - len(plan["scenarios"]))
+
+        def too_big():
+            steps = sum(len(sc["steps"]) for sc in to_run)
+            size = len(json.dumps({"scenarios": to_run}, ensure_ascii=False))
+            return size > MAX_SCENARIO_INPUT or steps > runner.MAX_STEPS_TOTAL
+
+        while too_big() and to_run and to_run[-1].get("source") == "saved":
+            to_run.pop()
+        if too_big():
             return self.finish(rec, "error", "kịch bản AI soạn quá dài để gửi cho workflow")
-        rec.update(plan=plan, to_run=plan["scenarios"], round=1, stage="dispatch")
+        rec.update(plan=plan, to_run=to_run, round=1, repaired=[], stage="dispatch")
 
     def stage_dispatch(self, name, rec):
+        self.progress(name, rec, "test")
         request_id = secrets.token_hex(8)
         scenarios = json.dumps({"scenarios": rec["to_run"]}, ensure_ascii=False) if rec["to_run"] else ""
         try:
@@ -469,8 +561,8 @@ class Gate:
         if results is None:
             return self.finish(rec, "fail", "không có kết quả chạy thử (app không dựng được hoặc bộ chạy lỗi)")
         expected = {sc["name"][:200] for sc in rec["to_run"]}
-        if not expected <= {r["name"] for r in results if r["source"] == "ai"}:
-            return self.finish(rec, "fail", "kết quả thiếu kịch bản đã gửi")
+        if not expected <= {r["name"] for r in results if r["source"] != "baseline"}:
+            return self.finish(rec, "fail", "kết quả thiếu kịch bản đã gửi (bộ chạy trên main đã đúng phiên bản chưa?)")
 
         if rec["round"] == 1:
             rec["results"] = results
@@ -483,16 +575,21 @@ class Gate:
                     log.warning("Không sửa được kịch bản: %s", e)
                     fixed = []
                 if fixed:
-                    rec.update(to_run=fixed, round=2, repaired=[sc["name"] for sc in fixed], stage="dispatch")
+                    names = [sc["name"] for sc in fixed]
+                    merged = {sc["name"]: sc for sc in fixed}
+                    rec.update(final=[merged.get(sc["name"], sc) for sc in rec["to_run"]],
+                               to_run=fixed, round=2, repaired=names, stage="dispatch")
                     return
+                log.warning("Nhánh %s: không có bản sửa hợp lệ cho %d kịch bản lỗi", name, len(errors))
         else:
-            kept = [r for r in rec["results"] if r["source"] == "ai" and r["name"] not in rec["repaired"]]
+            kept = [r for r in rec["results"] if r["source"] != "baseline" and r["name"] not in rec["repaired"]]
             rec["results"] = results + kept
         rec["stage"] = "review"
 
     def stage_review(self, name, rec):
+        self.progress(name, rec, "review")
         results, plan = rec["results"], rec["plan"]
-        all_passed = bool(results) and all(r["status"] == "passed" for r in results)
+        bad = [r for r in results if r["status"] != "passed"]
         review, review_error = None, ""
         if self.cfg["ai"] != "off":
             ctx = self.context(rec)
@@ -501,10 +598,15 @@ class Gate:
             except ai.AIError as e:
                 review_error = str(e)
         rec["review"] = review
-        if not all_passed:
+        if bad or not results:
+            if review and bad and all(r["source"] == "ai" for r in bad) and not any(i["severity"] == "high" for i in review["issues"]):
+                causes = {s["scenario"]: s["cause"] for s in review["suspects"]}
+                if all(causes.get(r["name"]) == "test" for r in bad):
+                    return self.finish(rec, "suspect", f"{len(bad)} kịch bản mới không đạt, AI nghi do kịch bản (có thể sai)",
+                                       "kịch bản cơ bản và đã lưu đều đạt")
             return self.finish(rec, "fail", "có kịch bản không đạt")
         if self.cfg["ai"] == "off":
-            return self.finish(rec, "unverified", "AI đang tắt: chỉ chạy kịch bản cơ bản, chưa kiểm chức năng mới")
+            return self.finish(rec, "unverified", "AI đang tắt: chỉ chạy kịch bản có sẵn, chưa kiểm chức năng mới")
         if review is None:
             return self.finish(rec, "fail", f"AI không đánh giá được: {review_error}")
         if review["verdict"] != "pass":
@@ -530,83 +632,42 @@ class Gate:
             return f"không gắn được status {STATUS_CONTEXT}: {type(e).__name__} {getattr(e, 'code', '')}"
         return ""
 
-    HEADLINES = {
-        "pass": ("✅", "ĐẠT", "success"),
-        "manual": ("🟡", "ĐẠT nhưng bạn phải merge tay", "pending"),
-        "unverified": ("🟡", "CHƯA KIỂM ĐỦ", "pending"),
-        "fail": ("❌", "KHÔNG ĐẠT", "failure"),
-        "blocked": ("⛔", "BỊ CHẶN", "failure"),
-        "error": ("⚠️", "KHÔNG KIỂM ĐƯỢC", "failure"),
-    }
-
-    def render(self, name, rec, warning):
-        d = rec["decision"]
-        icon, label, _ = self.HEADLINES[d["outcome"]]
-        lines = [f"{icon} <b>{label}</b>", f"Nhánh <b>{esc(name)}</b> @ <code>{rec['sha'][:7]}</code>"]
-        if rec.get("title"):
-            lines.append(esc(rec["title"]))
-        plan = rec.get("plan") or {}
-        if plan.get("understanding"):
-            lines += ["", f"<b>AI hiểu chức năng:</b> {esc(plan['understanding'][:400])}"]
-        results = rec.get("results") or []
-        if results:
-            passed = sum(r["status"] == "passed" for r in results)
-            lines += ["", f"<b>Chạy thử: {passed}/{len(results)} đạt</b>"]
-            ordered = sorted(results, key=lambda r: (r["status"] == "passed", r["source"] != "ai"))
-            for r in ordered[:12]:
-                mark = {"passed": "✅", "failed": "❌", "error": "⚠️"}[r["status"]]
-                redone = " (đã soạn lại)" if r["name"] in rec.get("repaired", []) else ""
-                lines.append(f"{mark} {esc(r['name'][:90])}{redone}")
-                if r["status"] != "passed":
-                    lines.append(f"    {esc(str(r.get('request', ''))[:80])}: {esc(ai.redact(r.get('detail', ''))[:180])}")
-        review = rec.get("review")
-        if review:
-            lines += ["", f"<b>AI nhận xét:</b> {esc(review['summary'][:500])}"]
-            for i in review["issues"][:6]:
-                where = f"{i['file']}:{i['line']}" if i["line"] else i["file"]
-                lines.append(f"• [{i['severity']}] {esc(where[:80])} {esc(i['detail'][:160])}")
-        if d["reasons"]:
-            lines += ["", "<b>Lý do:</b>"] + [f"• {esc(x[:220])}" for x in d["reasons"][:8]]
-        lines += [f"⚠️ {esc(x[:200])}" for x in (rec.get("warnings") or [])[:4]]
-        if warning:
-            lines.append(f"⚠️ {esc(warning)}")
-        footer = [""]
-        for text, url in (("CI", rec.get("ci_url")), ("Chạy thử", rec.get("run_url")),
-                          ("Thay đổi", f"https://github.com/{self.cfg['repo']}/compare/{self.cfg['base']}...{rec['sha']}")):
-            if url:
-                footer.append(f'<a href="{html.escape(url)}">{text}</a>')
-        if self.cfg["mode"] != "execute":
-            footer.append("<i>dry-run: không tạo PR, không merge</i>")
-        tail = "\n".join(footer)
-        body = ""
-        for line in lines:  # cắt theo dòng để không làm vỡ thẻ HTML
-            if len(body) + len(line) + len(tail) > 3900:
-                body += "\n…"
-                break
-            body += ("\n" if body else "") + line
-        return body + "\n" + tail
-
-    def sign(self, pid, kind):
-        return hmac.new(self.secret, f"{kind}:{pid}".encode(), hashlib.sha256).hexdigest()[:16]
+    def result_buttons(self, rec):
+        outcome = rec["decision"]["outcome"]
+        bad = [r for r in rec.get("results") or [] if r["status"] != "passed"]
+        can_retest = rec.get("scope") is not None and rec.get("retests", 0) < self.cfg["max_retests"]
+        buttons = []
+        if outcome == "pass":
+            buttons.append(("a", "✅ Tạo PR & merge"))
+        if outcome == "manual":
+            buttons.append(("a", "📝 Tạo PR (tự merge tay)"))
+        if outcome == "suspect":
+            buttons.append(("a", "📝 Tạo PR, tôi tự merge"))
+        if outcome in ("suspect", "fail", "error") and can_retest:
+            buttons.append(("n", "🔁 Test lại"))
+            if any(r["source"] == "saved" for r in bad):
+                buttons.append(("z", "🗑 Bỏ test cũ bị lỗi & test lại"))
+        if bad:
+            buttons.append(("d", "📄 Chi tiết"))
+        if outcome in ("pass", "manual", "suspect"):
+            buttons.append(("r", "❌ Từ chối"))
+        return buttons
 
     def stage_report(self, name, rec):
         outcome = rec["decision"]["outcome"]
-        _, label, status = self.HEADLINES[outcome]
+        _, label, status = views.HEADLINES[outcome]
+        if rec.get("progress_id"):
+            self.progress(name, rec, "done")
         warning = self.set_status(rec["sha"], status, label, rec.get("run_url", ""))
-        buttons, pid = None, None
-        if outcome in ("pass", "manual"):
-            pid = rec.setdefault("pid", secrets.token_hex(6))
-            approve = "✅ Tạo PR & merge" if outcome == "pass" else "📝 Tạo PR (tự merge tay)"
-            buttons = [{"text": text, "callback_data": f"{kind}:{pid}:{self.sign(pid, kind)}"}
-                       for kind, text in (("a", approve), ("r", "❌ Từ chối"))]
-        message_id = self.tg.send(self.render(name, rec, warning), buttons)
-        if message_id is None:
-            raise RuntimeError("không gửi được tin Telegram")
-        if pid:
-            self.state["pending"][pid] = {"branch": name, "sha": rec["sha"], "auto": outcome == "pass",
-                                          "message_id": message_id, "expires": self.clock() + APPROVAL_TTL}
+        text = views.result(self.cfg, name, rec, warning)
+        buttons = self.result_buttons(rec)
+        if buttons:
+            if not self.send_card(name, rec, text, buttons, auto=outcome == "pass"):
+                raise RuntimeError("không gửi được tin Telegram")
             rec["stage"] = "awaiting"
         else:
+            if self.tg.send(text) is None:
+                raise RuntimeError("không gửi được tin Telegram")
             rec["stage"] = "done"
 
     def expire_pending(self):
@@ -614,12 +675,12 @@ class Gate:
             if p["expires"] < self.clock():
                 del self.state["pending"][pid]
                 self.tg.clear_buttons(p["message_id"])
-                self.tg.send(f"⌛ <b>{esc(p['branch'])}</b>: quá 24 giờ chưa duyệt, đã huỷ.")
+                self.tg.send(f"⌛ <b>{esc(p['branch'])}</b>: quá 24 giờ chưa bấm, đã huỷ. Gõ /test hoặc /merge để làm lại.")
                 rec = self.state["branches"].get(p["branch"])
-                if rec:
+                if rec and rec["stage"] in ("awaiting", "awaiting_test"):
                     rec["stage"] = "done"
 
-    # ------------------------------------------------ nút Telegram
+    # ------------------------------------------------ xử lý nút
     def is_authorized(self, chat_id, user_id):
         """Đúng chat; có GATE_APPROVER_IDS thì chỉ những người đó; chat nhóm (id âm) không khai báo thì chặn."""
         if str(chat_id) != self.cfg["tg_chat"]:
@@ -629,36 +690,84 @@ class Gate:
         return not self.cfg["tg_chat"].startswith("-")
 
     def handle_callback(self, cb):
-        chat = ((cb.get("message") or {}).get("chat") or {}).get("id")
+        chat_id = ((cb.get("message") or {}).get("chat") or {}).get("id")
         user = (cb.get("from") or {}).get("id")
-        if not self.is_authorized(chat, user):
+        if not self.is_authorized(chat_id, user):
             log.warning("Bỏ qua nút bấm của người không có quyền: %s", user)
             return self.tg.answer(cb["id"], "Bạn không có quyền duyệt")
         parts = (cb.get("data") or "").split(":")
-        if len(parts) != 3 or parts[0] not in ("a", "r") or not hmac.compare_digest(
-                parts[2].encode(), self.sign(parts[1], parts[0]).encode()):
+        if len(parts) != 3 or not hmac.compare_digest(parts[2].encode(), self.sign(parts[1], parts[0]).encode()):
             return self.tg.answer(cb["id"], "Nút không hợp lệ")
+        kind, pid = parts[0], parts[1]
         self.expire_pending()
-        p = self.state["pending"].pop(parts[1], None)  # lấy ra trước khi làm: mỗi nút chỉ dùng 1 lần
-        if not p:
+        p = self.state["pending"].get(pid)
+        if not p or kind not in p.get("kinds", []):
             return self.tg.answer(cb["id"], "Yêu cầu đã xử lý hoặc hết hạn")
+        name, rec = p["branch"], self.state["branches"].get(p["branch"])
+        current = rec is not None and rec["sha"] == p["sha"]
+        if kind == "d":  # chỉ xem: không tiêu nút
+            self.tg.answer(cb["id"], "Đang gửi chi tiết")
+            if current:
+                self.tg.send(views.details(name, rec))
+            return
+        del self.state["pending"][pid]  # lấy ra trước khi làm: mỗi thẻ chỉ dùng 1 lần
         self.save()
         self.tg.answer(cb["id"], "Đã nhận")
         self.tg.clear_buttons(p["message_id"])
-        name, rec = p["branch"], self.state["branches"].get(p["branch"])
         title = f"<b>{esc(name)}</b>"
-        if not rec or rec["sha"] != p["sha"]:
-            return self.tg.send(f"⚠️ {title} đã đổi sau khi kiểm, yêu cầu bị huỷ.")
-        rec["stage"] = "done"
-        if parts[0] == "r":
+        if not current:
+            return self.tg.send(f"⚠️ {title} đã đổi sau lúc gửi thẻ, yêu cầu bị huỷ.")
+        if kind in ("t", "x") and rec["stage"] != "awaiting_test" or kind not in ("t", "x") and rec["stage"] != "awaiting":
+            return self.tg.send(f"⚠️ {title} đang ở bước khác, yêu cầu bị huỷ.")
+        if kind == "x":
+            rec["stage"] = "done"
+            self.tg.send(f"⏭ {title}: bỏ qua, không kiểm. Gõ /test {esc(name)} khi cần.")
+        elif kind in ("t", "n", "z"):
+            if kind != "t":
+                self.prepare_retest(rec, drop_saved=kind == "z")
+            rec["stage"] = "plan"
+            self.save()
+            self.advance(name)
+        elif kind == "r":
+            rec["stage"] = "done"
             self.set_status(p["sha"], "failure", "Người duyệt từ chối")
             self.tg.send(f"🚫 {title}: đã từ chối.")
-            return self.save()
-        try:
-            self.approve(name, rec, p, title)
-        except (OSError, ValueError, KeyError) as e:
-            self.tg.send(f"⚠️ {title}: không tạo được PR ({type(e).__name__} {getattr(e, 'code', '')}).")
+        else:
+            rec["stage"] = "done"
+            self.remember_passed(rec)
+            try:
+                self.approve(name, rec, p, title)
+            except (OSError, ValueError, KeyError) as e:
+                self.tg.send(f"⚠️ {title}: không tạo được PR ({type(e).__name__} {getattr(e, 'code', '')}).")
         self.save()
+
+    def prepare_retest(self, rec, drop_saved):
+        bad = [r for r in rec.get("results") or [] if r["status"] != "passed"]
+        if drop_saved:
+            broken = {r["name"] for r in bad if r["source"] == "saved"}
+            self.state["saved"] = [s for s in self.state["saved"]
+                                   if f"[cũ] {s['scenario']['name']}"[:190] not in broken]
+        rec["retests"] = rec.get("retests", 0) + 1
+        rec["previous_errors"] = [{k: r.get(k) for k in ("name", "request", "expected", "detail")}
+                                  for r in bad if r["source"] == "ai"][:6]
+        for key in ("results", "review", "decision", "run_url", "progress_id", "to_run", "final", "plan"):
+            rec.pop(key, None)
+
+    def remember_passed(self, rec):
+        """Người đã duyệt -> kịch bản mới đã đạt được lưu để lần sau chạy lại (không tốn lượt AI)."""
+        passed = {r["name"] for r in rec.get("results") or [] if r["source"] == "ai" and r["status"] == "passed"}
+        scenarios = rec.get("final") or rec.get("to_run") or []
+        known = {saved_key(s["scenario"]) for s in self.state["saved"]}
+        scope = rec.get("scope") or {}
+        # không khoanh vùng được -> để trống = lần nào cũng chạy. "Chung toàn hệ thống" luôn được chọn nên không giúp phân loại
+        features = [] if scope.get("wide") else [f for f in scope.get("features", []) if f != "Chung toàn hệ thống"]
+        for sc in scenarios:
+            if sc.get("source") == "saved" or sc["name"] not in passed or saved_key(sc) in known:
+                continue
+            known.add(saved_key(sc))
+            self.state["saved"].append({"features": features, "sha": rec["sha"],
+                                        "scenario": {"name": sc["name"], "steps": sc["steps"]}})
+        self.state["saved"] = self.state["saved"][-MAX_SAVED:]
 
     def head_of(self, branch):
         return self.gh.get(f"/git/ref/heads/{urllib.parse.quote(branch)}")["object"]["sha"]
@@ -715,7 +824,7 @@ class Gate:
 
 # ---------------------------------------------------------------- vòng chính
 def skip_backlog(telegram):
-    """Bỏ qua nút bấm gửi lúc gate đang tắt: lệnh cũ không được chạy bất ngờ."""
+    """Bỏ qua tin và nút bấm gửi lúc gate đang tắt: lệnh cũ không được chạy bất ngờ."""
     res = telegram.call("getUpdates", {"offset": -1, "timeout": 0}, timeout=15)
     return res[-1]["update_id"] + 1 if res else 0
 
@@ -749,11 +858,13 @@ def main():
             continue
         for update in updates:
             offset = max(offset, update["update_id"] + 1)
-            if "callback_query" in update:
-                try:
+            try:
+                if "callback_query" in update:
                     gate.handle_callback(update["callback_query"])
-                except Exception:
-                    log.exception("Lỗi xử lý nút bấm")
+                elif "message" in update:
+                    gate.handle_message(update["message"])
+            except Exception as e:
+                log.warning("Lỗi xử lý tin Telegram: %s %s", type(e).__name__, ai.redact(str(e))[:300])
 
 
 if __name__ == "__main__":

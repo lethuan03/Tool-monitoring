@@ -88,6 +88,30 @@ class RunnerTest(unittest.TestCase):
                          {"path": "missing", "exists": False}]))
         self.assertEqual(result["status"], "passed", result)
 
+    def test_dotted_variable(self):
+        result = self.run_one(
+            step("GET", "/api/products/7", 200, save={"all": ""}, setup=True),
+            step("GET", "/api/products/${all.id}", 200, checks=[{"path": "id", "equals": "${all.id}"}]))
+        self.assertEqual(result["status"], "passed", result)
+
+    def test_unknown_variable_syntax_is_reported_not_sent(self):
+        for path in ("/api/products/${all[0].id}", "/api/products/${missing.0.id}", "/api/products/${"):
+            with self.subTest(path=path):
+                result = self.run_one(step("GET", path, 200))
+                self.assertEqual((result["status"], result["actual_status"]), ("error", None))
+                self.assertIn("biến", result["detail"])
+
+    def test_failure_keeps_evidence(self):
+        result = self.run_one(step("GET", "/api/products/7", 200, save={"id": "id"}, setup=True),
+                              step("POST", "/api/buy", 200, json={"productId": "${id}", "quantity": 1}))
+        self.assertEqual((result["request"], result["actual_status"]), ("POST /api/buy", 201))
+        self.assertIn('"productId": 7', result["body"])
+        self.assertIn('"status": 200', result["expected"])
+
+    def test_saved_source_is_kept(self):
+        sc = {**scenario(step("GET", "/health", 200)), "source": "saved"}
+        self.assertEqual(runner.run([("ai", [sc])], self.base, {})["scenarios"][0]["source"], "saved")
+
     def test_cookie_kept_inside_scenario_only(self):
         self.assertEqual(self.run_one(step("POST", "/api/login", 200), step("GET", "/api/me", 200))["status"], "passed")
         self.assertEqual(self.run_one(step("GET", "/api/me", 401))["status"], "passed")

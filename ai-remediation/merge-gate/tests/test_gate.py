@@ -8,11 +8,13 @@ import sys
 import tempfile
 import unittest
 import urllib.error
+import urllib.parse
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 import ai  # noqa: E402
+import chat  # noqa: E402
 import gate  # noqa: E402
 
 logging.disable(logging.CRITICAL)
@@ -21,6 +23,12 @@ SCENARIO = {"name": "mã giảm giá", "steps": [
     {"setup": True, "request": {"method": "GET", "path": "/api/products"}, "expect": {"status": 200}},
     {"request": {"method": "GET", "path": "/api/sale"}, "expect": {"status": 200}}]}
 JOBS = ["Backend (Node.js)", "Frontend (Node.js)", "AI remediation (Python) (x)", "Build thử image (không push) (x)"]
+ROUTE = "webapp/backend/src/routes/products.js"
+REPO_FILES = {
+    "webapp/backend/src/server.js": "const p = require('./routes/products');\napp.use('/api/products', p);\n",
+    ROUTE: "const router = r();\nrouter.get('/sale', h);\nmodule.exports = router;\n",
+    "webapp/features/products.md": f"# Sản phẩm\n\nFiles: {ROUTE}\n\nQUY-TAC-SAN-PHAM\n",
+}
 
 
 def http_error(code):
@@ -30,12 +38,13 @@ def http_error(code):
 class FakeGitHub:
     def __init__(self):
         self.heads = {"main": MAIN, "old": "c" * 40}
-        self.files = [{"filename": "webapp/backend/src/server.js", "status": "modified", "patch": "+x", "changes": 1}]
-        self.message = "Thêm API /api/sale trả 200"
+        self.files = [{"filename": ROUTE, "status": "modified", "patch": "@@ -2 +2 @@\n+x", "changes": 1}]
+        self.message = "Thêm API /api/products/sale trả 200"
         self.ci = {"push": "success", "pull_request": "success"}
         self.jobs = JOBS
-        self.pulls, self.writes, self.dispatches = [], [], []
-        self.results = [["passed"]]  # trạng thái kịch bản AI ở mỗi lượt chạy thử
+        self.pulls, self.writes, self.dispatches, self.reads = [], [], [], []
+        self.results = [["passed"]]  # trạng thái kịch bản MỚI ở mỗi lượt chạy thử
+        self.saved_status, self.baseline_status, self.no_result = "passed", "passed", False
         self.pr = {"number": 5, "state": "open", "merged": False, "mergeable": True, "head": {"sha": SHA}}
         self.merge_error = None
 
@@ -57,15 +66,17 @@ class FakeGitHub:
                  "head_branch": branch, "status": "completed" if c != "running" else "in_progress", "conclusion": c}
                 for event, c in self.ci.items() if c]}
         if path.startswith("/git/trees/"):
-            return {"tree": [{"path": "webapp/backend/src/server.js", "type": "blob"}]}
+            return {"tree": [{"path": p, "type": "blob"} for p in REPO_FILES]}
         if path.startswith("/contents/"):
-            return {"content": base64.b64encode(b"const app = 1;").decode()}
+            name = urllib.parse.unquote(path[len("/contents/"):])
+            self.reads.append((name, params["ref"]))
+            return {"content": base64.b64encode(REPO_FILES[name].encode()).decode()}
         if path.endswith("ai-test.yml/runs"):
             return {"workflow_runs": [
                 {"id": 100 + i, "display_title": f"ai-test {d['inputs']['request_id']}", "status": "completed",
                  "html_url": "http://run"} for i, d in enumerate(self.dispatches)]}
         if path.endswith("/artifacts"):
-            return {"artifacts": [{"id": int(path.split("/")[-2]), "name": "ai-test-result"}] if self.results else []}
+            return {"artifacts": [] if self.no_result else [{"id": int(path.split("/")[-2]), "name": "ai-test-result"}]}
         if path.startswith("/git/ref/heads/"):
             return {"object": {"sha": self.heads[path.split("heads/")[1]]}}
         if path == "/pulls":
@@ -74,14 +85,22 @@ class FakeGitHub:
             return self.pr
         raise AssertionError(path)
 
+    def sent(self, index=-1):
+        text = self.dispatches[index]["inputs"]["scenarios"]
+        return json.loads(text)["scenarios"] if text else []
+
     def raw(self, path):
         index = int(path.split("/")[-2]) - 100
-        sent = self.dispatches[index]["inputs"]["scenarios"]
-        names = [s["name"] for s in json.loads(sent)["scenarios"]] if sent else []
         statuses = self.results[min(index, len(self.results) - 1)]
-        rows = [{"name": "cơ bản", "source": "baseline", "status": "passed"}]
-        rows += [{"name": n, "source": "ai", "status": statuses[i % len(statuses)], "detail": "d", "request": "GET /"}
-                 for i, n in enumerate(names)]
+        rows = [{"name": "cơ bản", "source": "baseline", "status": self.baseline_status}]
+        fresh = 0
+        for sc in self.sent(index):
+            if sc.get("source") == "saved":
+                rows.append({"name": sc["name"], "source": "saved", "status": self.saved_status})
+            else:
+                rows.append({"name": sc["name"], "source": "ai", "status": statuses[fresh % len(statuses)],
+                             "detail": "CHI-TIET-LOI", "request": "GET /api/sale", "step": 2, "actual_status": 500})
+                fresh += 1
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w") as z:
             z.writestr("result.json", json.dumps({"scenarios": rows}))
@@ -99,13 +118,16 @@ class FakeGitHub:
 
 class FakeTelegram:
     def __init__(self):
-        self.sent, self.answers, self.cleared, self.down = [], [], [], False
+        self.sent, self.edits, self.answers, self.cleared, self.down = [], [], [], [], False
 
     def send(self, text, buttons=None):
         if self.down:
             return None
         self.sent.append((text, buttons))
         return len(self.sent)
+
+    def edit(self, message_id, text):
+        self.edits.append((message_id, text))
 
     def clear_buttons(self, message_id):
         self.cleared.append(message_id)
@@ -117,7 +139,8 @@ class FakeTelegram:
 class FakeModel:
     def __init__(self):
         self.calls, self.clear, self.verdict, self.scenarios = [], True, "pass", [SCENARIO]
-        self.repaired, self.raw = [SCENARIO], None
+        self.repaired, self.raw, self.cause, self.issues = [SCENARIO], None, "code", []
+        self.action = None
 
     def __call__(self, system, user):
         self.calls.append((system, user))
@@ -127,11 +150,14 @@ class FakeModel:
             return json.dumps({"understanding": "API sale", "requirement_clear": self.clear,
                                "scenarios": self.scenarios, "untestable": []})
         if '"verdict"' in system:
-            return json.dumps({"verdict": self.verdict, "summary": "ổn", "issues": []})
+            suspects = [{"scenario": sc["name"], "cause": self.cause, "why": "vì"} for sc in self.scenarios]
+            return json.dumps({"verdict": self.verdict, "summary": "ổn", "issues": self.issues, "suspects": suspects})
+        if '"reply"' in system:
+            return json.dumps({"reply": "Trả lời <b>", "action": self.action})
         return json.dumps({"scenarios": self.repaired})
 
 
-class GateTest(unittest.TestCase):
+class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.now = 1_000_000.0
@@ -151,23 +177,52 @@ class GateTest(unittest.TestCase):
     def make(self):
         return gate.Gate(gate.load_config(self.env), self.gh, self.tg, self.model, clock=lambda: self.now)
 
-    def push(self, branch="feature", sha=SHA):
-        """Khởi động gate rồi push commit mới, chạy tới khi gate phải chờ."""
-        g = self.make()
-        g.tick()
-        self.gh.heads[branch] = sha
-        for _ in range(4):
+    def run_ticks(self, g, count=4):
+        for _ in range(count):
             g.tick()
             self.now += 130
+
+    def offer(self, g=None, branch="feature", sha=SHA):
+        """Push commit mới, chạy tới thẻ xin phép kiểm."""
+        if g is None:
+            g = self.make()
+            g.tick()
+        self.gh.heads[branch] = sha
+        self.run_ticks(g, 3)
         return g
 
-    def press(self, g, index=0, user=42, data=None, chat=42):
-        buttons = [b for _, b in self.tg.sent if b][-1]
-        g.handle_callback({"id": "cb", "from": {"id": user}, "message": {"chat": {"id": chat}},
-                           "data": data or buttons[index]["callback_data"]})
+    def push(self, **kw):
+        """Push rồi cho phép kiểm, chạy tới khi có kết quả."""
+        g = self.offer(**kw)
+        if self.has("t"):
+            self.press(g, "t")
+            self.run_ticks(g)
+        return g
+
+    def cards(self):
+        return [b for _, b in self.tg.sent if b]
+
+    def kinds(self):
+        return [b["callback_data"].split(":")[0] for b in self.cards()[-1]] if self.cards() else []
+
+    def has(self, kind):
+        return kind in self.kinds()
+
+    def data(self, kind):
+        return next(b["callback_data"] for b in self.cards()[-1] if b["callback_data"].startswith(kind + ":"))
+
+    def press(self, g, kind="a", user=42, data=None, chat_id=42):
+        g.handle_callback({"id": "cb", "from": {"id": user}, "message": {"chat": {"id": chat_id}},
+                           "data": data or self.data(kind)})
+
+    def say(self, g, text, user=42, chat_id=42):
+        g.handle_message({"text": text, "from": {"id": user}, "chat": {"id": chat_id}})
 
     def last(self):
         return self.tg.sent[-1][0]
+
+    def result_text(self):
+        return [t for t, b in self.tg.sent if "Chạy thử:" in t or "<b>KHÔNG" in t or "<b>BỊ CHẶN" in t][-1]
 
     def paths(self):
         return [p for _, p, _ in self.gh.writes]
@@ -175,10 +230,25 @@ class GateTest(unittest.TestCase):
     def statuses(self):
         return [b["state"] for _, p, b in self.gh.writes if p.startswith("/statuses/")]
 
-    # ---------------------------------------------------------- đường chính
+
+class FlowTest(Base):
+    def test_nothing_runs_before_permission(self):
+        self.offer()
+        self.assertEqual((self.model.calls, self.gh.dispatches, self.gh.writes), ([], [], []))
+        self.assertEqual(self.kinds(), ["t", "x"])
+        card = self.last()
+        for text in ("Xin phép kiểm", "GET /api/products/sale", "Sản phẩm", "tối đa 3 lượt"):
+            self.assertIn(text, card)
+
+    def test_skip(self):
+        g = self.offer()
+        self.press(g, "x")
+        self.run_ticks(g)
+        self.assertEqual((self.model.calls, self.gh.dispatches), ([], []))
+
     def test_pass_approve_creates_pr_and_merges_reviewed_commit(self):
         g = self.push()
-        self.assertIn("ĐẠT", self.last())
+        self.assertIn("ĐẠT", self.result_text())
         self.assertEqual(self.statuses(), ["success"])
         self.assertNotIn("/pulls", self.paths())  # chưa duyệt thì chưa tạo PR
         self.press(g)
@@ -188,12 +258,33 @@ class GateTest(unittest.TestCase):
         self.assertEqual(len(self.model.calls), 2)
         self.assertEqual(self.gh.dispatches[0]["ref"], "main")
 
-    def test_button_works_once(self):
-        g = self.push()
-        data = self.tg.sent[-1][1][0]["callback_data"]
-        self.press(g, data=data)
+    def test_progress_message_is_edited(self):
+        self.push()
+        progress = [t for t, _ in self.tg.sent if t.startswith("🔄")]
+        self.assertEqual(len(progress), 1)
+        texts = [t for _, t in self.tg.edits]
+        self.assertTrue(any("⏳ Chạy thử" in t for t in texts))
+        self.assertIn("Kết quả: <b>ĐẠT</b>", texts[-1])
+
+    def test_only_related_code_and_main_feature_docs_sent_to_ai(self):
+        self.push()
+        prompt = self.model.calls[0][1]
+        self.assertIn("QUY-TAC-SAN-PHAM", prompt)
+        self.assertIn("GET /api/products/sale", prompt)
+        self.assertIn(("webapp/features/products.md", MAIN), self.gh.reads)
+        self.assertNotIn(("webapp/features/products.md", SHA), self.gh.reads)
+
+    def test_buttons_work_once(self):
+        g = self.offer()
+        allow = self.data("t")
+        self.press(g, data=allow)
+        self.press(g, data=allow)
+        self.run_ticks(g)
+        self.assertEqual(len(self.gh.dispatches), 1)
+        merge = self.data("a")
+        self.press(g, data=merge)
         g.tick()
-        self.press(g, data=data)
+        self.press(g, data=merge)
         g.tick()
         self.assertEqual(self.paths().count("/pulls/5/merge"), 1)
 
@@ -207,37 +298,33 @@ class GateTest(unittest.TestCase):
         self.assertIn("dry-run", self.last())
 
     def test_old_branches_ignored_until_pr_opened(self):
-        g = self.push(branch="test/x")  # nhánh trong danh sách bỏ qua
-        self.assertEqual((self.model.calls, self.gh.dispatches), ([], []))
+        g = self.offer(branch="test/x")  # nhánh trong danh sách bỏ qua
+        self.assertEqual(self.cards(), [])
         self.gh.pulls = [{"head": {"ref": "old", "sha": "c" * 40, "repo": {"full_name": "other/fork"}}}]
-        g.tick()
-        self.assertEqual(self.model.calls, [])  # PR từ fork
+        self.run_ticks(g, 2)
+        self.assertEqual(self.cards(), [])  # PR từ fork
         self.gh.pulls[0]["head"]["repo"]["full_name"] = "me/shop"
-        for _ in range(3):
-            g.tick()
-            self.now += 130
-        self.assertEqual(len(self.gh.dispatches), 1)
+        self.run_ticks(g, 3)
+        self.assertTrue(self.has("t"))
 
-    def test_no_changed_file_costs_nothing(self):
-        self.gh.files = []
-        self.push()
-        self.assertEqual((self.model.calls, self.gh.dispatches, self.gh.writes), ([], [], []))
-
-    def test_waits_for_quiet_period(self):
+    def test_quiet_period_and_no_changed_file(self):
         g = self.make()
         g.tick()
         self.gh.heads["feature"] = SHA
         g.tick()
-        self.assertEqual(self.model.calls, [])
+        self.assertEqual(self.cards(), [])
+        self.reset()
+        self.gh.files = []
+        self.offer()
+        self.assertEqual(self.cards(), [])
 
-    # ---------------------------------------------------------- không đạt
-    def test_ci_failed_or_job_missing_never_calls_ai(self):
+    def test_ci_failed_or_job_missing_never_offers_test(self):
         for change in ({"ci": {"push": "failure"}}, {"jobs": JOBS[:2]}):
             with self.subTest(change=change):
                 self.reset()
                 vars(self.gh).update(change)
-                self.push()
-                self.assertEqual((self.model.calls, self.gh.dispatches), ([], []))
+                self.offer()
+                self.assertEqual((self.cards(), self.model.calls), ([], []))
                 self.assertIn("KHÔNG ĐẠT", self.last())
                 self.assertEqual(self.statuses(), ["failure"])
 
@@ -247,17 +334,74 @@ class GateTest(unittest.TestCase):
             with self.subTest(file=f["filename"]):
                 self.reset()
                 self.gh.files = [f]
-                self.push()
-                self.assertEqual(self.model.calls, [])
+                self.offer()
+                self.assertEqual((self.cards(), self.model.calls), ([], []))
                 self.assertIn("BỊ CHẶN", self.last())
-                self.assertIsNone(self.tg.sent[-1][1])
 
-    def test_failed_scenario_cannot_pass_even_if_ai_says_pass(self):
-        self.gh.results = [["failed"]]
+    def test_ai_off_runs_without_ai(self):
+        self.env["GATE_AI"] = "off"
         self.push()
-        self.assertIn("KHÔNG ĐẠT", self.last())
-        self.assertIsNone(self.tg.sent[-1][1])
-        self.assertEqual(len(self.gh.dispatches), 1)  # fail thì không soạn lại
+        self.assertEqual(self.model.calls, [])
+        self.assertEqual(self.gh.dispatches[0]["inputs"]["scenarios"], "")
+        self.assertIn("CHƯA KIỂM ĐỦ", self.result_text())
+        self.assertNotIn("a", self.kinds())  # không có nút merge
+        self.assertEqual(self.statuses(), ["pending"])
+
+    def test_daily_limit(self):
+        self.env["GATE_MAX_REVIEWS_PER_DAY"] = "0"
+        self.push()
+        self.assertEqual((self.model.calls, self.gh.dispatches), ([], []))
+        self.assertIn("hết 0 lần", self.last())
+
+
+class ResultTest(Base):
+    def test_failed_scenario_blamed_on_code_has_no_merge_button(self):
+        self.gh.results = [["failed"]]
+        g = self.push()
+        self.assertIn("KHÔNG ĐẠT", self.result_text())
+        self.assertEqual(self.kinds(), ["n", "d"])
+        self.assertEqual(len(self.gh.dispatches), 1)  # fail thì không tự soạn lại
+        self.press(g, "d")
+        self.assertIn("CHI-TIET-LOI", self.last())
+        self.assertIn("lỗi ở <b>code</b>", self.last())
+        self.assertEqual(len(g.state["pending"]), 1)  # xem chi tiết không mất nút
+
+    def test_suspected_test_error_allows_manual_pr_only(self):
+        self.gh.results, self.model.cause, self.model.verdict = [["failed"]], "test", "fail"
+        g = self.push()
+        self.assertIn("nghi do kịch bản", self.result_text())
+        self.assertEqual(self.kinds(), ["a", "n", "d", "r"])
+        self.assertEqual(self.statuses(), ["pending"])
+        self.press(g, "a")
+        g.tick()
+        self.assertIn("/pulls", self.paths())
+        self.assertNotIn("/pulls/5/merge", self.paths())
+        self.assertEqual(g.state["saved"], [])  # kịch bản không đạt không được lưu
+
+    def test_not_suspect_when_other_evidence_points_to_code(self):
+        cases = {"cơ bản fail": {"baseline_status": "failed"}}
+        for label, change in cases.items():
+            with self.subTest(label):
+                self.reset()
+                self.gh.results, self.model.cause = [["failed"]], "test"
+                vars(self.gh).update(change)
+                self.push()
+                self.assertNotIn("a", self.kinds())
+        self.reset()
+        self.gh.results, self.model.cause = [["failed"]], "test"
+        self.model.issues = [{"severity": "high", "detail": "sql"}]
+        self.push()
+        self.assertNotIn("a", self.kinds())
+
+    def test_retest_sends_previous_errors_and_is_limited(self):
+        self.env["GATE_MAX_RETESTS"] = "1"
+        self.gh.results = [["failed"], ["failed"]]
+        g = self.push()
+        self.press(g, "n")
+        self.run_ticks(g)
+        self.assertEqual(len(self.gh.dispatches), 2)
+        self.assertIn("CHI-TIET-LOI", self.model.calls[2][1])
+        self.assertEqual(self.kinds(), ["d"])
 
     def test_ai_fail_verdict_and_bad_json_never_pass(self):
         for attr, value in (("verdict", "fail"), ("raw", "không phải json"), ("raw", '{"scenarios": "x"}')):
@@ -265,22 +409,24 @@ class GateTest(unittest.TestCase):
                 self.reset()
                 setattr(self.model, attr, value)
                 self.push()
-                self.assertIsNone(self.tg.sent[-1][1])
+                self.assertNotIn("a", self.kinds())
                 self.assertEqual(self.statuses(), ["failure"])
 
     def test_missing_result_is_fail(self):
-        self.gh.results = []
+        self.gh.no_result = True
         self.push()
         self.assertIn("không có kết quả", self.last())
+        self.assertNotIn("a", self.kinds())
 
-    # ---------------------------------------------------------- soạn lại kịch bản
     def test_error_scenario_repaired_once(self):
         self.gh.results = [["error"], ["passed"]]
-        self.push()
+        g = self.push()
         self.assertEqual(len(self.gh.dispatches), 2)
         self.assertEqual(len(self.model.calls), 3)
-        self.assertIn("đã soạn lại", self.last())
+        self.assertIn("đã soạn lại", self.result_text())
         self.assertEqual(self.statuses(), ["success"])
+        self.press(g)
+        self.assertEqual(len(g.state["saved"]), 1)
 
     def test_repair_stops_after_one_round(self):
         self.gh.results = [["error"], ["error"]]
@@ -297,7 +443,6 @@ class GateTest(unittest.TestCase):
         self.assertEqual(len(self.gh.dispatches), 1)
         self.assertEqual(self.statuses(), ["failure"])
 
-    # ---------------------------------------------------------- phải merge tay
     def test_manual_cases_do_not_auto_merge(self):
         cases = {
             "được bảo vệ": [{"filename": ".github/workflows/ci.yml", "status": "modified", "patch": "+a"}],
@@ -313,39 +458,74 @@ class GateTest(unittest.TestCase):
                 else:
                     self.model.clear = False
                 g = self.push()
-                self.assertIn(reason, self.last())
+                self.assertIn(reason, self.result_text())
                 self.assertEqual(self.statuses(), ["pending"])
                 self.press(g)
                 g.tick()
                 self.assertIn("/pulls", self.paths())
                 self.assertNotIn("/pulls/5/merge", self.paths())
 
-    def test_ai_off_runs_baseline_only_without_buttons(self):
-        self.env["GATE_AI"] = "off"
-        self.push()
-        self.assertEqual(self.model.calls, [])
-        self.assertEqual(self.gh.dispatches[0]["inputs"]["scenarios"], "")
-        self.assertIn("CHƯA KIỂM ĐỦ", self.last())
-        self.assertIsNone(self.tg.sent[-1][1])
+    def test_changing_feature_docs_is_warned(self):
+        self.gh.files.append({"filename": "webapp/features/products.md", "status": "modified", "patch": "+a"})
+        self.offer()
+        self.assertIn("sửa mô tả chức năng", self.last())
 
-    def test_daily_limit(self):
-        self.env["GATE_MAX_REVIEWS_PER_DAY"] = "0"
-        self.push()
-        self.assertEqual(self.model.calls, [])
-        self.assertEqual(sum("hết 0 lượt" in t for t, _ in self.tg.sent), 1)
 
-    # ---------------------------------------------------------- an toàn khi duyệt
-    def test_stranger_wrong_chat_and_forged_button_ignored(self):
+class SavedTest(Base):
+    def approve_first(self):
         g = self.push()
-        self.env["GATE_APPROVER_IDS"] = ""
-        self.press(g, chat=7)
-        reject = self.tg.sent[-1][1][1]["callback_data"]
-        self.press(g, data="a" + reject[1:])  # đổi nút Từ chối thành Duyệt
-        g.cfg["approvers"] = {"1"}
-        self.press(g, user=42)
+        self.press(g)
         g.tick()
-        self.assertNotIn("/pulls", self.paths())
+        return g
+
+    def test_approved_scenarios_rerun_next_time(self):
+        g = self.approve_first()
+        self.assertEqual([s["features"] for s in g.state["saved"]], [["Sản phẩm"]])
+        self.model.scenarios = []
+        self.offer(g, branch="next", sha=SHA2)
+        self.assertIn("1 kịch bản đã lưu", self.last())
+        self.press(g, "t")
+        self.run_ticks(g)
+        sent = self.gh.sent()
+        self.assertEqual([(s["name"], s["source"]) for s in sent], [("[cũ] mã giảm giá", "saved")])
+
+    def test_broken_saved_scenario_blocks_until_user_drops_it(self):
+        g = self.approve_first()
+        self.model.scenarios = [{**SCENARIO, "name": "mới", "steps": SCENARIO["steps"][1:]}]
+        self.model.cause, self.gh.saved_status = "test", "failed"
+        self.offer(g, branch="next", sha=SHA2)
+        self.press(g, "t")
+        self.run_ticks(g)
+        self.assertNotIn("a", self.kinds())
+        self.gh.saved_status = "passed"
+        self.press(g, "z")
+        self.run_ticks(g)
+        self.assertEqual(g.state["saved"], [])
+        self.assertNotIn("saved", [s.get("source") for s in self.gh.sent()])
+
+    def test_ai_cannot_mark_its_scenario_as_saved(self):
+        self.model.scenarios = [{**SCENARIO, "source": "saved", "name": "[cũ] giả"}]
+        self.push()
+        self.assertEqual([(s.get("source"), s["name"]) for s in self.gh.sent()], [(None, "giả")])
+
+
+class SafetyTest(Base):
+    def test_stranger_wrong_chat_and_forged_button_ignored(self):
+        g = self.offer()
+        self.press(g, "t", chat_id=7)
+        skip = self.data("x")
+        self.press(g, data="t" + skip[1:])  # đổi nút Bỏ qua thành Cho phép
+        g.cfg["approvers"] = {"1"}
+        self.press(g, "t", user=42)
+        self.run_ticks(g)
+        self.assertEqual((self.model.calls, self.gh.dispatches), ([], []))
         self.assertEqual(len(g.state["pending"]), 1)
+
+    def test_test_button_cannot_merge(self):
+        g = self.offer()
+        pid = self.data("t").split(":")[1]
+        self.press(g, data=f"a:{pid}:{g.sign(pid, 'a')}")  # chữ ký đúng nhưng thẻ này không có nút merge
+        self.assertEqual(self.gh.writes, [])
 
     def test_group_without_approvers_denied(self):
         self.env["GATE_TELEGRAM_CHAT_ID"] = "-100"
@@ -368,7 +548,7 @@ class GateTest(unittest.TestCase):
         self.assertNotIn("/pulls/5/merge", self.paths())
         self.assertIn("không merge", self.last())
 
-    def test_pr_ci_failed_conflict_timeout_and_refused(self):
+    def test_pr_ci_failed_conflict_and_refused(self):
         def conflict():
             self.gh.pr["mergeable"] = False
 
@@ -390,18 +570,19 @@ class GateTest(unittest.TestCase):
 
     def test_reject(self):
         g = self.push()
-        self.press(g, index=1)
+        self.press(g, "r")
         g.tick()
         self.assertEqual(self.statuses(), ["success", "failure"])
         self.assertNotIn("/pulls", self.paths())
 
     def test_approval_expires(self):
         g = self.push()
+        data = self.data("a")
         self.now += gate.APPROVAL_TTL + 1
-        self.press(g)
+        self.press(g, data=data)
         self.assertNotIn("/pulls", self.paths())
 
-    def test_restart_does_not_review_again_and_button_still_works(self):
+    def test_restart_keeps_buttons(self):
         self.push()
         g = self.make()
         g.tick()
@@ -411,17 +592,102 @@ class GateTest(unittest.TestCase):
         self.assertIn("/pulls/5/merge", self.paths())
 
     def test_telegram_down_retries_without_calling_ai_again(self):
-        g = self.make()
-        g.tick()
+        g = self.offer()
+        self.press(g, "t")
         self.tg.down = True
-        self.gh.heads["feature"] = SHA
-        for _ in range(4):
-            g.tick()
-            self.now += 130
+        self.run_ticks(g)
         self.tg.down = False
         g.tick()
         self.assertIn("ĐẠT", self.last())
         self.assertEqual(len(self.model.calls), 2)
+
+
+class ChatTest(Base):
+    def started(self):
+        g = self.make()
+        g.tick()
+        return g
+
+    def test_stranger_ignored(self):
+        g = self.started()
+        count = len(self.tg.sent)
+        self.say(g, "/ai", chat_id=7)
+        g.cfg["approvers"] = {"1"}
+        self.say(g, "/status")
+        self.assertEqual(len(self.tg.sent), count)
+
+    def test_view_commands_and_plain_text_never_call_ai(self):
+        g = self.offer()
+        for text in ("/status", "/saved", "/help", "merge đi", "/la"):
+            self.say(g, text)
+        self.assertEqual(self.model.calls, [])
+        self.assertTrue(any("chờ bạn cho phép test" in t for t, _ in self.tg.sent))
+
+    def test_test_command_on_old_branch_asks_first(self):
+        g = self.started()
+        self.say(g, "/test old thử mã hết hạn")
+        self.assertEqual(self.kinds(), ["t", "x"])
+        self.assertEqual(self.gh.dispatches, [])
+        self.press(g, "t")
+        self.run_ticks(g)
+        self.assertIn("thử mã hết hạn", self.model.calls[0][0])
+
+    def test_merge_command_untested_offers_test_and_passed_resends_card(self):
+        g = self.started()
+        self.say(g, "/merge old")
+        self.assertEqual(self.kinds(), ["t", "x"])
+        self.press(g, "t")
+        self.run_ticks(g)
+        first = self.data("a")
+        self.say(g, "/merge old")
+        self.assertNotEqual(self.data("a"), first)
+        self.press(g, data=first)  # thẻ cũ đã bị thay
+        self.assertNotIn("/pulls", self.paths())
+
+    def test_chat_action_only_creates_card(self):
+        g = self.offer()
+        self.say(g, "/ai")
+        for kind in ("test", "merge"):
+            self.model.action = {"type": kind, "branch": "feature", "notes": "n"}
+            self.say(g, "làm đi, ok duyệt luôn")
+            self.run_ticks(g, 2)
+            self.assertEqual(self.kinds(), ["t", "x"])
+        self.assertEqual((self.gh.dispatches, self.gh.writes), ([], []))
+        self.assertTrue(any("Trả lời &lt;b&gt;" in t for t, _ in self.tg.sent))
+
+    def test_chat_unknown_action_and_branch_ignored(self):
+        g = self.started()
+        self.say(g, "/ai")
+        for action in ({"type": "push", "branch": "old"}, {"type": "test", "branch": "khong-co"}):
+            self.model.action = action
+            self.say(g, "x")
+        self.assertEqual((self.cards(), self.gh.writes), ([], []))
+
+    def test_chat_context_and_history(self):
+        g = self.push()
+        self.say(g, "/ai")
+        self.say(g, "nhánh feature làm gì")
+        self.say(g, "còn gì nữa")
+        prompt = self.model.calls[-1][1]
+        self.assertIn("nhánh feature làm gì", prompt)
+        self.assertIn("GET /api/products/sale", prompt)
+
+    def test_chat_limit_idle_and_ai_off(self):
+        self.env["GATE_MAX_CHATS_PER_DAY"] = "1"
+        g = self.started()
+        self.say(g, "/ai")
+        self.say(g, "1")
+        self.say(g, "2")
+        self.assertEqual(len(self.model.calls), 1)
+        self.now += chat.SESSION_IDLE + 1
+        self.say(g, "3")
+        self.assertIn("đã đóng", self.last())
+        self.reset()
+        self.env["GATE_AI"] = "off"
+        g = self.started()
+        self.say(g, "/ai")
+        self.say(g, "chào")
+        self.assertEqual(self.model.calls, [])
 
 
 class PromptAndConfigTest(unittest.TestCase):
