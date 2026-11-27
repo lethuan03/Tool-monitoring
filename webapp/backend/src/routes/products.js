@@ -29,6 +29,15 @@ router.get(
   })
 );
 
+// GET /api/products/count - số sản phẩm đang bán (phải đứng trước '/:id')
+router.get(
+  '/count',
+  asyncHandler(async (req, res) => {
+    const [[row]] = await pool.query('SELECT COUNT(*) AS count FROM products WHERE active = 1');
+    res.json({ count: Number(row.count) });
+  })
+);
+
 // GET /api/products/:id - single product
 router.get(
   '/:id',
