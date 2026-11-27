@@ -43,7 +43,9 @@ TIMEOUT = 15
 METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"}
 HEADERS = {"accept", "content-type", "origin", "sec-fetch-site"}
 OPERATORS = {"equals", "not_equals", "exists", "contains", "gt", "gte", "lt", "lte", "length", "length_gte"}
-VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]{0,40})\}")
+NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,40}")
+# ${ten} hoặc ${ten.0.id} (lấy phần tử bên trong biến đã lưu)
+VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]{0,40}(?:\.[A-Za-z0-9_-]{1,40}){0,6})\}")
 MISSING = object()
 
 
@@ -115,7 +117,7 @@ def _validate_step(step, where):
         ops = set(c) - {"path"}
         _need(ops and ops <= OPERATORS, f"{where}: toán tử kiểm tra không hợp lệ")
     save = step.get("save", {})
-    _need(isinstance(save, dict) and all(VAR_RE.fullmatch("${%s}" % k) and isinstance(v, str) for k, v in save.items()),
+    _need(isinstance(save, dict) and all(NAME_RE.fullmatch(k) and isinstance(v, str) for k, v in save.items()),
           f"{where}: save sai")
 
 
@@ -127,6 +129,8 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def substitute(value, variables):
     if isinstance(value, str):
+        if "${" in VAR_RE.sub("", value):  # không được lặng lẽ gửi nguyên chuỗi "${...}" đi
+            raise StepError(f"biến viết sai: {value[:80]!r}")
         whole = VAR_RE.fullmatch(value)
         if whole:  # cả chuỗi là 1 biến -> giữ nguyên kiểu (số vẫn là số)
             return _lookup(variables, whole[1])
@@ -146,9 +150,11 @@ def substitute(value, variables):
 
 
 def _lookup(variables, name):
-    if name not in variables:
+    root, _, rest = name.partition(".")
+    value = dig(variables[root], rest) if root in variables else MISSING
+    if value is MISSING:
         raise StepError(f"chưa có biến ${{{name}}}")
-    return variables[name]
+    return value
 
 
 def dig(data, path):
@@ -251,6 +257,8 @@ def run_scenario(scenario, base_url, variables, source):
     opener = urllib.request.build_opener(
         urllib.request.ProxyHandler({}), urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()), _NoRedirect())
     variables = {**variables, "unique": secrets.token_hex(4)}
+    if scenario.get("source") == "saved":  # kịch bản đã đạt và được duyệt ở lần trước
+        source = "saved"
     result = {"name": scenario["name"][:200], "source": source, "status": "passed"}
     for number, step in enumerate(scenario["steps"], 1):
         status, text = None, ""
@@ -262,11 +270,22 @@ def run_scenario(scenario, base_url, variables, source):
             setup_only = step.get("setup") and not (status and status >= 500)
             result["status"] = "error" if isinstance(e, StepError) or setup_only else "failed"
             request = step["request"]
+            # bằng chứng: đã GỬI gì (sau khi thay biến), MONG gì, NHẬN gì
+            path = _best_effort(request["path"], variables)
             result.update(step=number, step_name=str(step.get("name", ""))[:200],
-                          request=f"{request['method']} {request['path']}"[:200],
-                          detail=str(e)[:400], response=text[:500])
+                          request=f"{request['method']} {path}"[:200],
+                          body=json.dumps(_best_effort(request.get("json"), variables), ensure_ascii=False)[:500],
+                          expected=json.dumps(_best_effort(step["expect"], variables), ensure_ascii=False)[:500],
+                          actual_status=status, detail=str(e)[:400], response=text[:500])
             break
     return result
+
+
+def _best_effort(value, variables):
+    try:
+        return substitute(value, variables)
+    except StepError:
+        return value
 
 
 def check_base_url(url):

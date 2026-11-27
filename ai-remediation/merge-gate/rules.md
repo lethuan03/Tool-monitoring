@@ -4,7 +4,8 @@ Hệ thống: nginx (cổng vào) → frontend tĩnh và backend Node.js/Express
 `/api/auth`, `/health`) → MySQL. API quản trị cần đăng nhập admin (cookie phiên). `/metrics` không được lộ ra ngoài.
 
 ## Soạn kịch bản
-- Chuẩn đúng/sai là mô tả chức năng trong commit message.
+- Chuẩn đúng/sai là commit message của thay đổi và mô tả chức năng trên `main` (nếu có). Commit message nói rõ là
+  đổi hành vi thì theo commit message, và nêu điều đó trong `understanding`.
 - Phủ cả trường hợp đúng, dữ liệu sai, giá trị biên và quyền truy cập của phần vừa đổi.
 - Chỉ dùng đường dẫn, trường dữ liệu thật sự có trong mã nguồn được cung cấp hoặc được mô tả yêu cầu.
 - Mỗi kịch bản tự tạo dữ liệu nó cần, không phụ thuộc thứ tự chạy.

@@ -7,7 +7,8 @@ RUN pip install --no-cache-dir "boto3>=1.39,<2" \
     && useradd --create-home --uid 10003 gate \
     && mkdir -p /state && chown gate:gate /state
 
-COPY ci-logs/fetch_logs.py merge-gate/gate.py merge-gate/ai.py merge-gate/runner.py merge-gate/rules.md /app/
+COPY ci-logs/fetch_logs.py merge-gate/gate.py merge-gate/ai.py merge-gate/chat.py merge-gate/views.py \
+     merge-gate/scope.py merge-gate/runner.py merge-gate/rules.md /app/
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 STATE_FILE=/state/state.json
 USER gate

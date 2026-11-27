@@ -3,5 +3,8 @@
 !ci-logs/fetch_logs.py
 !merge-gate/gate.py
 !merge-gate/ai.py
+!merge-gate/chat.py
+!merge-gate/views.py
+!merge-gate/scope.py
 !merge-gate/runner.py
 !merge-gate/rules.md
