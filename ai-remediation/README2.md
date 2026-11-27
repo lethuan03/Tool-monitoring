@@ -491,16 +491,18 @@ Test (GitHub giả trên 127.0.0.1): `python -m unittest discover -s ai-remediat
 
 ## 11. merge-gate — AI kiểm chức năng trước khi merge vào `main`
 
-Mọi code muốn vào `main` phải qua: **CI → chạy thử app thật trên máy ảo GitHub → AI đánh giá → người duyệt trên Telegram → tạo PR → CI của PR xanh → merge đúng commit đã kiểm.** Không phải viết unit test cho chức năng mới. CD và gán version chưa làm.
+Mọi code muốn vào `main` phải qua: **mở Pull Request → CI → chạy thử app thật trên máy ảo GitHub → AI đánh giá → người duyệt trên Telegram → merge đúng commit đã kiểm.** Không phải viết unit test cho chức năng mới. CD và gán version chưa làm.
+
+**Yêu cầu merge = PR đang mở vào `main`** (từ nhánh trong repo, không phải draft). Push lên nhánh chưa có PR thì bot không làm gì. Push commit mới lên nhánh đang có PR thì kiểm lại. Đóng PR thì huỷ yêu cầu đang chờ, mở lại thì hỏi lại. Gõ `/test <nhánh>` cũng là một yêu cầu (chưa có PR thì bot tạo khi bạn duyệt merge).
 
 ```
-push nhánh ≠ main ─> CI ─> merge-gate (container trên máy local)
+PR vào main ─> CI của PR ─> merge-gate (container trên máy local)
         ├─ kiểm tra cứng (file .env/khoá -> chặn) + khoanh vùng code bị ảnh hưởng (không tốn phí)
         ├─ Telegram: XIN PHÉP KIỂM [✅ Cho phép] [❌ Bỏ qua]
         ├─ Bedrock: mô tả chức năng + phần code liên quan -> kịch bản test (JSON)
         ├─ workflow ai-test (bản trên main): dựng app đúng commit -> kịch bản cơ bản + đã lưu + mới
         ├─ Bedrock: đọc kết quả + diff -> đạt / không đạt, lỗi nghi ở code hay ở test
-        └─ Telegram: XIN PHÉP MERGE [✅ Tạo PR & merge] [❌ Từ chối]
+        └─ Telegram: XIN PHÉP MERGE [✅ Merge vào main] [❌ Từ chối]
 ```
 
 ### 11.1. Chuẩn chấm: commit message và file mô tả chức năng
@@ -525,7 +527,7 @@ AI không có công cụ: chữ gõ trong chat hay chữ AI viết chỉ tạo �
 | Lệnh | Việc |
 |---|---|
 | `/status` | Các nhánh đang xử lý, số lượt AI đã dùng |
-| `/test <nhánh> [yêu cầu thêm]` | Xin phép kiểm (cả nhánh cũ) |
+| `/test <nhánh> [yêu cầu thêm]` | Xin phép kiểm (cả nhánh cũ, không cần PR) |
 | `/merge <nhánh>` | Đã có kết quả: gửi lại thẻ duyệt. Chưa kiểm: đề nghị kiểm trước |
 | `/saved` | Kịch bản đã lưu |
 | `/ai`, `/end` | Mở / đóng phiên chat (tự đóng sau 15 phút im lặng) |
@@ -539,17 +541,18 @@ Từ diff tìm route chứa dòng đổi, file mà nó `require`, và (với fil
 
 | Tin nhắn | Khi nào | Nút | Status `ai-gate` |
 |---|---|---|---|
-| ✅ ĐẠT | Mọi kịch bản đạt, AI đạt, không có lý do merge tay | Tạo PR & merge | success |
-| 🟡 merge tay | Đạt nhưng: sửa `.github/`, `merge-gate/`, `ci-logs/`, `policy.json`, file compose · có file ngoài `webapp/{backend,mysql,nginx}` (trừ `.md`) · AI không xem được hết · mô tả không rõ | Tạo PR (bạn merge) | pending |
-| 🟡 nghi do kịch bản | Chỉ kịch bản **mới** không đạt, AI cho là test sai cho tất cả, không có lỗi code mức cao | Tạo PR (bạn merge), Test lại | pending |
+| ✅ ĐẠT | Mọi kịch bản đạt, AI đạt, không có lý do merge tay | Merge vào main (chưa có PR: Tạo PR & merge) | success |
+| 🟡 merge tay | Đạt nhưng: sửa `.github/`, `merge-gate/`, `ci-logs/`, `policy.json`, file compose · có file ngoài `webapp/{backend,mysql,nginx}` (trừ `.md`) · AI không xem được hết · mô tả không rõ | Bạn merge tay trên GitHub (chưa có PR: nút Tạo PR) | pending |
+| 🟡 nghi do kịch bản | Chỉ kịch bản **mới** không đạt, AI cho là test sai cho tất cả, không có lỗi code mức cao | Test lại; merge tay trên GitHub (chưa có PR: nút Tạo PR) | pending |
 | 🟡 CHƯA KIỂM ĐỦ | `GATE_AI=off` | không | pending |
 | ❌ KHÔNG ĐẠT | CI hỏng, kịch bản fail, AI chấm fail hoặc trả lời hỏng, app không dựng được | Test lại, Chi tiết (CI hỏng thì không có nút) | failure |
 | ⛔ BỊ CHẶN | Diff có file `.env` thật hoặc khoá/token (không gửi cho AI) | không | failure |
 
 - Còn kịch bản chưa đạt thì **không bao giờ tự merge**. Phân loại "lỗi test" là ý kiến AI, có thể sai: bấm **📄 Chi tiết** để xem đã gọi gì, mong gì, nhận gì.
 - Kịch bản **không chạy được** (lỗi bước chuẩn bị) được soạn lại tự động 1 lần, phải giữ nguyên kết quả mong đợi.
-- Khi bạn duyệt, kịch bản mới đã đạt được **lưu** (trong volume state, tối đa 100) và chạy lại cho các thay đổi cùng chức năng mà không tốn lượt AI. Cố ý đổi hành vi làm test cũ fail: bấm **🗑 Bỏ test cũ bị lỗi & test lại**.
-- Lần chạy đầu chỉ ghi nhận các nhánh đang có. Bỏ qua `backup/*`, `test/*`; PR từ fork không xử lý.
+- Kịch bản mới đã đạt chỉ được **lưu sau khi đúng commit đó được merge vào `main`** (bot merge hoặc bạn merge tay). Bấm duyệt ở dry-run, đóng PR, bấm Từ chối, hoặc merge một commit khác thì không lưu; chờ quá 30 ngày thì bỏ. Kịch bản đã lưu (volume state, tối đa 100) chạy lại cho các thay đổi cùng chức năng mà không tốn lượt AI. Cố ý đổi hành vi làm test cũ fail: bấm **🗑 Bỏ test cũ bị lỗi & test lại**.
+- Mỗi PR chỉ được hỏi một lần cho mỗi commit. Muốn kiểm lại (ví dụ sau khi chạy lại CI bị hỏng) thì gõ `/test <nhánh>`. Đã kiểm đạt rồi mới mở PR thì bot gửi lại thẻ duyệt, không gọi AI.
+- Bỏ qua `backup/*`, `test/*`; PR từ fork không xử lý.
 
 ### 11.6. File
 
@@ -585,7 +588,8 @@ Từ diff tìm route chứa dòng đổi, file mà nó `require`, và (với fil
   docker compose -f webapp/docker-compose.test.yml down -v
   ```
 - **Đã thử (27/11/2026):** bản đầu chạy thông với GitHub, Telegram và Bedrock thật ở dry-run. Bản có khoanh vùng, xin phép, lưu test và chat mới thử cục bộ: unit test (Python 3.12), baseline trên app thật, khoanh vùng trên diff thật.
-- **Chưa thử:** bản mới với Telegram/Bedrock thật, tạo PR/merge thật.
+- Bản khoanh vùng đã chạy thông ở dry-run (xin phép → 17/17 kịch bản đạt → duyệt). Phần kích hoạt bằng PR mới có unit test.
+- **Chưa thử:** kích hoạt bằng PR trên GitHub thật, tạo PR/merge thật, gắn status, chat.
 - Chỉ chạy thử được qua HTTP API; giao diện (JS trong trình duyệt) chưa kiểm → merge tay.
 - Khoanh vùng dựa trên `require` tương đối và `router.<method>`: viết route kiểu khác thì cần xem lại `scope.py`.
 - AI có thể bỏ sót hoặc chấm sai; kịch bản mới mỗi lần có thể khác nhau.

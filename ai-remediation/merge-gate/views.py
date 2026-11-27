@@ -16,7 +16,8 @@ MARKS = {"passed": "✅", "failed": "❌", "error": "⚠️"}
 SOURCES = {"baseline": "cơ bản", "saved": "đã lưu", "ai": "mới"}
 STAGES = {"new": "chờ CI", "ask": "chuẩn bị", "awaiting_test": "chờ bạn cho phép test", "plan": "AI soạn kịch bản",
           "dispatch": "gửi chạy thử", "testing": "đang chạy thử", "review": "AI đánh giá", "report": "đang báo kết quả",
-          "awaiting": "chờ bạn duyệt", "pr_wait": "chờ CI của PR", "done": "xong", "baseline": "chưa kiểm"}
+          "awaiting": "chờ bạn duyệt", "pr_wait": "chờ CI của PR", "done": "xong",
+          "baseline": "chưa có yêu cầu merge"}
 
 
 def esc(s):
@@ -38,6 +39,12 @@ def head(name, rec):
     return f"Nhánh <b>{esc(name)}</b> @ <code>{rec['sha'][:7]}</code>"
 
 
+def pr_lines(rec):
+    if not rec.get("pr"):
+        return []
+    return [f'📥 Yêu cầu merge: <a href="{html.escape(rec.get("pr_url", ""))}">PR #{rec["pr"]}</a>']
+
+
 def scope_lines(scope):
     if not scope:
         return []
@@ -55,7 +62,7 @@ def scope_lines(scope):
 
 
 def test_card(name, rec, ai_on, saved_count, used, limit):
-    lines = ["🔎 <b>Xin phép kiểm code</b>", head(name, rec), esc(rec.get("title", "")), ""]
+    lines = ["🔎 <b>Xin phép kiểm code</b>", head(name, rec), *pr_lines(rec), esc(rec.get("title", "")), ""]
     lines.append(f"File đổi ({len(rec.get('changed', []))}): " + esc(", ".join(rec.get("changed", [])[:8])))
     lines += scope_lines(rec.get("scope"))
     lines += [f"⚠️ {esc(w[:200])}" for w in rec.get("warnings", [])[:4]]
@@ -103,7 +110,7 @@ def progress(name, rec, current, ai_on):
 def result(cfg, name, rec, warning=""):
     d = rec["decision"]
     icon, label, _ = HEADLINES[d["outcome"]]
-    lines = [f"{icon} <b>{label}</b>", head(name, rec)]
+    lines = [f"{icon} <b>{label}</b>", head(name, rec), *pr_lines(rec)]
     if rec.get("title"):
         lines.append(esc(rec["title"]))
     plan = rec.get("plan") or {}
@@ -135,6 +142,8 @@ def result(cfg, name, rec, warning=""):
     lines += [f"⚠️ {esc(x[:200])}" for x in (rec.get("warnings") or [])[:4]]
     if warning:
         lines.append(f"⚠️ {esc(warning)}")
+    if rec.get("pr") and d["outcome"] in ("manual", "suspect"):
+        lines.append("👉 Bot không merge trường hợp này: xem lại rồi merge tay trên GitHub.")
     footer = [""]
     for text, url in (("CI", rec.get("ci_url")), ("Chạy thử", rec.get("run_url")),
                       ("Thay đổi", f"https://github.com/{cfg['repo']}/compare/{cfg['base']}...{rec['sha']}")):

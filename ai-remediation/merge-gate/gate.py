@@ -1,9 +1,10 @@
 """merge-gate: mọi code muốn vào main phải qua CI + chạy thử chức năng + người duyệt trên Telegram.
 
-Chạy trên máy local (1 container, không mở cổng, 1 luồng). Mỗi nhánh có commit mới:
+Chạy trên máy local (1 container, không mở cổng, 1 luồng). Yêu cầu merge = PR mở vào main (hoặc /test, /merge):
   CI xanh -> kiểm tra cứng + khoanh vùng -> XIN PHÉP KIỂM -> AI soạn kịch bản -> workflow ai-test trên GitHub
-  -> AI đánh giá -> XIN PHÉP MERGE -> tạo PR -> CI của PR xanh -> merge đúng commit đã kiểm.
-Gọi AI, chạy workflow, tạo PR, merge đều chỉ xảy ra sau khi người được phép bấm nút.
+  -> AI đánh giá -> XIN PHÉP MERGE -> CI của PR xanh -> merge đúng commit đã kiểm (chưa có PR thì tạo).
+Push lên nhánh chưa có PR thì không làm gì. Gọi AI, chạy workflow, tạo PR, merge đều chỉ xảy ra sau khi người
+được phép bấm nút.
 
 Mặc định an toàn: GATE_AI=off (không gọi Bedrock) và GATE_MODE=dry-run (không gắn status, không tạo PR, không merge;
 đã được cho phép thì vẫn kích hoạt workflow chạy thử). Biến môi trường: xem .env.mergegate.example và README2.md mục 11.
@@ -51,6 +52,9 @@ APPROVAL_TTL = 86400
 MAX_ERRORS = 10
 MAX_SCENARIO_INPUT = 60000  # giới hạn input của workflow_dispatch khoảng 65 535 ký tự
 MAX_SAVED = 100
+MAX_WAITING = 20  # số kết quả chờ merge để lưu kịch bản
+WAITING_TTL = 30 * 86400
+POSITIVE = ("pass", "manual", "suspect")  # kết quả còn merge được
 
 # Sửa các đường dẫn này = có thể đổi chính cách kiểm tra -> không bao giờ tự merge
 PROTECTED = (".github/*", "ai-remediation/merge-gate/*", "ai-remediation/ci-logs/*",
@@ -257,7 +261,7 @@ class Gate(chat.ChatMixin):
     def __init__(self, cfg, github, telegram, model=None, clock=time.time):
         self.cfg, self.gh, self.tg, self.model, self.clock = cfg, github, telegram, model, clock
         self.state = {"initialized": False, "branches": {}, "pending": {}, "reviews": [], "chat_calls": [],
-                      "saved": [], "session": None, "secret": ""}
+                      "saved": [], "waiting": [], "session": None, "secret": ""}
         if os.path.exists(cfg["state_file"]):
             with open(cfg["state_file"], encoding="utf-8") as f:
                 self.state.update(json.load(f))
@@ -284,7 +288,7 @@ class Gate(chat.ChatMixin):
                     branches[name] = {"sha": sha, "stage": "baseline", "seen_at": now}
             self.state["initialized"] = True
             self.tg.send(f"🚦 <b>merge-gate</b> đã chạy ({esc(self.cfg['mode'])}, AI: {esc(self.cfg['ai'])}). "
-                         f"Ghi nhận {len(branches)} nhánh hiện có, chỉ kiểm commit mới từ bây giờ. /help")
+                         f"Chỉ kiểm khi có PR mở vào {esc(self.cfg['base'])} (hoặc gõ /test). /help")
         else:
             for name in [n for n in branches if n not in heads or self.ignored(n)]:
                 self.drop_pending(name)
@@ -292,15 +296,42 @@ class Gate(chat.ChatMixin):
             for name, sha in heads.items():
                 if not self.ignored(name) and branches.get(name, {}).get("sha") != sha:
                     self.drop_pending(name)
-                    branches[name] = {"sha": sha, "stage": "new", "seen_at": now}
-        # PR vào main mở bằng tay từ nhánh cũ -> cũng phải kiểm (PR từ fork: bỏ qua)
-        for pr in self.gh.pages("/pulls", state="open", base=self.cfg["base"]):
-            head = pr["head"]
-            rec = branches.get(head["ref"])
-            if (rec and rec["stage"] == "baseline" and rec["sha"] == head["sha"]
-                    and (head.get("repo") or {}).get("full_name") == self.cfg["repo"]):
-                rec.update(stage="new", seen_at=now)
+                    branches[name] = {"sha": sha, "stage": "baseline", "seen_at": now}  # push thôi thì chưa làm gì
+        self.sync_requests(now)
         self.save()
+
+    def sync_requests(self, now):
+        """PR đang mở vào main = yêu cầu merge. PR từ fork: bỏ qua."""
+        requests = {pr["head"]["ref"]: pr for pr in self.gh.pages("/pulls", state="open", base=self.cfg["base"])
+                    if (pr["head"].get("repo") or {}).get("full_name") == self.cfg["repo"]}
+        for name, rec in list(self.state["branches"].items()):
+            pr = requests.get(name)
+            if pr is None:
+                if rec.get("pr") and rec["stage"] != "pr_wait":  # pr_wait tự xử lý PR của nó
+                    self.withdraw(name, rec)
+                continue
+            if pr.get("draft") or pr["head"]["sha"] != rec["sha"] or rec.get("pr") == pr["number"]:
+                continue
+            link = {"pr": pr["number"], "pr_url": pr.get("html_url", "")}
+            positive = (rec.get("decision") or {}).get("outcome") in POSITIVE
+            if rec["stage"] == "done" and positive:  # đã kiểm đúng commit này -> gửi lại thẻ, không tốn lượt AI
+                rec.update(link, stage="report")
+            elif rec["stage"] in ("baseline", "done"):
+                self.state["branches"][name] = {"sha": rec["sha"], "stage": "new", "seen_at": now, **link}
+            else:  # đang xử lý (do /test): chỉ gắn PR vào
+                rec.update(link)
+
+    def withdraw(self, name, rec):
+        """PR không còn mở (đóng, hoặc merge ngoài bot): huỷ việc đang chờ."""
+        number = rec["pr"]
+        if rec["stage"] not in ("done", "baseline"):
+            merged = self.gh.get(f"/pulls/{number}").get("merged")
+            self.drop_pending(name)
+            rec["stage"] = "done"
+            what = "đã được merge" if merged else "đã đóng"
+            self.tg.send(f"⏹ <b>{esc(name)}</b>: PR #{number} {what}, huỷ yêu cầu đang chờ.")
+        del rec["pr"]
+        rec.pop("pr_url", None)
 
     def drop_pending(self, branch):
         for pid, p in list(self.state["pending"].items()):
@@ -312,6 +343,7 @@ class Gate(chat.ChatMixin):
     def tick(self):
         self.expire_pending()
         self.sync_branches()
+        self.save_merged()
         for name in list(self.state["branches"]):
             self.advance(name)
 
@@ -412,12 +444,13 @@ class Gate(chat.ChatMixin):
             rec["stage"] = "done"  # không đổi file nào so với main (vd chỉ gộp main vào nhánh)
             return
         rec["title"] = cmp_["commits"][-1]["commit"]["message"].splitlines()[0][:150] if cmp_.get("commits") else ""
-        status, url = self.ci_state(rec["sha"], name, "push")
+        status, url = self.ci_state(rec["sha"], name, "pull_request" if rec.get("pr") else "push")
         rec["ci_url"] = url
         if status == "failed":
             return self.finish(rec, "fail", "CI không đạt")
         if status == "missing" and (waited > CI_MISSING_AFTER or rec.get("requested")):
-            return self.finish(rec, "error", "không thấy CI chạy cho commit này (nhánh cũ thì gộp main vào rồi push)")
+            hint = "PR bị conflict thì GitHub không chạy CI" if rec.get("pr") else "nhánh cũ thì gộp main vào rồi push"
+            return self.finish(rec, "error", f"không thấy CI chạy cho commit này ({hint})")
         if status == "success":
             rec["stage"] = "ask"
 
@@ -634,14 +667,15 @@ class Gate(chat.ChatMixin):
 
     def result_buttons(self, rec):
         outcome = rec["decision"]["outcome"]
+        has_pr = bool(rec.get("pr"))
         bad = [r for r in rec.get("results") or [] if r["status"] != "passed"]
         can_retest = rec.get("scope") is not None and rec.get("retests", 0) < self.cfg["max_retests"]
         buttons = []
         if outcome == "pass":
-            buttons.append(("a", "✅ Tạo PR & merge"))
-        if outcome == "manual":
+            buttons.append(("a", "✅ Merge vào main" if has_pr else "✅ Tạo PR & merge"))
+        if outcome == "manual" and not has_pr:  # đã có PR thì bạn merge tay trên GitHub, không cần nút
             buttons.append(("a", "📝 Tạo PR (tự merge tay)"))
-        if outcome == "suspect":
+        if outcome == "suspect" and not has_pr:
             buttons.append(("a", "📝 Tạo PR, tôi tự merge"))
         if outcome in ("suspect", "fail", "error") and can_retest:
             buttons.append(("n", "🔁 Test lại"))
@@ -649,7 +683,7 @@ class Gate(chat.ChatMixin):
                 buttons.append(("z", "🗑 Bỏ test cũ bị lỗi & test lại"))
         if bad:
             buttons.append(("d", "📄 Chi tiết"))
-        if outcome in ("pass", "manual", "suspect"):
+        if outcome in POSITIVE:
             buttons.append(("r", "❌ Từ chối"))
         return buttons
 
@@ -669,6 +703,8 @@ class Gate(chat.ChatMixin):
             if self.tg.send(text) is None:
                 raise RuntimeError("không gửi được tin Telegram")
             rec["stage"] = "done"
+        if outcome in POSITIVE:
+            self.queue_saved(name, rec)
 
     def expire_pending(self):
         for pid, p in list(self.state["pending"].items()):
@@ -724,6 +760,7 @@ class Gate(chat.ChatMixin):
             self.tg.send(f"⏭ {title}: bỏ qua, không kiểm. Gõ /test {esc(name)} khi cần.")
         elif kind in ("t", "n", "z"):
             if kind != "t":
+                self.unqueue_saved(name, p["sha"])
                 self.prepare_retest(rec, drop_saved=kind == "z")
             rec["stage"] = "plan"
             self.save()
@@ -731,10 +768,10 @@ class Gate(chat.ChatMixin):
         elif kind == "r":
             rec["stage"] = "done"
             self.set_status(p["sha"], "failure", "Người duyệt từ chối")
+            self.unqueue_saved(name, p["sha"])
             self.tg.send(f"🚫 {title}: đã từ chối.")
         else:
             rec["stage"] = "done"
-            self.remember_passed(rec)
             try:
                 self.approve(name, rec, p, title)
             except (OSError, ValueError, KeyError) as e:
@@ -753,21 +790,51 @@ class Gate(chat.ChatMixin):
         for key in ("results", "review", "decision", "run_url", "progress_id", "to_run", "final", "plan"):
             rec.pop(key, None)
 
-    def remember_passed(self, rec):
-        """Người đã duyệt -> kịch bản mới đã đạt được lưu để lần sau chạy lại (không tốn lượt AI)."""
+    def unqueue_saved(self, name, sha):
+        self.state["waiting"] = [w for w in self.state["waiting"] if (w["branch"], w["sha"]) != (name, sha)]
+
+    def queue_saved(self, name, rec):
+        """Kịch bản mới đã đạt CHỜ tới khi đúng commit này được merge: trước đó main chưa có chức năng."""
         passed = {r["name"] for r in rec.get("results") or [] if r["source"] == "ai" and r["status"] == "passed"}
         scenarios = rec.get("final") or rec.get("to_run") or []
-        known = {saved_key(s["scenario"]) for s in self.state["saved"]}
         scope = rec.get("scope") or {}
         # không khoanh vùng được -> để trống = lần nào cũng chạy. "Chung toàn hệ thống" luôn được chọn nên không giúp phân loại
         features = [] if scope.get("wide") else [f for f in scope.get("features", []) if f != "Chung toàn hệ thống"]
-        for sc in scenarios:
-            if sc.get("source") == "saved" or sc["name"] not in passed or saved_key(sc) in known:
+        keep = [{"name": sc["name"], "steps": sc["steps"]} for sc in scenarios
+                if sc.get("source") != "saved" and sc["name"] in passed]
+        self.unqueue_saved(name, rec["sha"])
+        if keep:
+            self.state["waiting"].append({"branch": name, "sha": rec["sha"], "features": features,
+                                          "scenarios": keep, "until": self.clock() + WAITING_TTL})
+        self.state["waiting"] = self.state["waiting"][-MAX_WAITING:]
+
+    def save_merged(self):
+        """PR của commit đang chờ đã merge (bot hoặc người merge) -> lưu kịch bản để lần sau chạy lại."""
+        owner = self.cfg["repo"].split("/")[0]
+        for entry in list(self.state["waiting"]):
+            try:
+                closed = self.gh.get("/pulls", state="closed", base=self.cfg["base"],
+                                     head=f"{owner}:{entry['branch']}", per_page=30)
+                merged = any(p.get("merged_at") and p["head"]["sha"] == entry["sha"] for p in closed)
+            except (OSError, ValueError, KeyError) as e:
+                log.warning("Không kiểm tra được PR đã merge của %s: %s", entry["branch"], type(e).__name__)
                 continue
-            known.add(saved_key(sc))
-            self.state["saved"].append({"features": features, "sha": rec["sha"],
-                                        "scenario": {"name": sc["name"], "steps": sc["steps"]}})
-        self.state["saved"] = self.state["saved"][-MAX_SAVED:]
+            if not merged and entry["until"] > self.clock():
+                continue
+            self.state["waiting"].remove(entry)
+            if not merged:
+                continue
+            known = {saved_key(s["scenario"]) for s in self.state["saved"]}
+            added = 0
+            for sc in entry["scenarios"]:
+                if saved_key(sc) not in known:
+                    known.add(saved_key(sc))
+                    self.state["saved"].append({"features": entry["features"], "sha": entry["sha"], "scenario": sc})
+                    added += 1
+            self.state["saved"] = self.state["saved"][-MAX_SAVED:]
+            self.save()
+            if added:
+                self.tg.send(f"💾 <b>{esc(entry['branch'])}</b> đã merge: lưu {added} kịch bản để chạy lại lần sau.")
 
     def head_of(self, branch):
         return self.gh.get(f"/git/ref/heads/{urllib.parse.quote(branch)}")["object"]["sha"]
@@ -776,18 +843,21 @@ class Gate(chat.ChatMixin):
         if self.head_of(name) != p["sha"]:
             return self.tg.send(f"⚠️ {title} có commit mới, không dùng kết quả cũ. Sẽ kiểm lại commit mới.")
         if self.cfg["mode"] != "execute":
-            what = "tạo PR và merge" if p["auto"] else "tạo PR"
+            what = ("merge PR" if rec.get("pr") else "tạo PR và merge") if p["auto"] else "tạo PR"
             return self.tg.send(f"🧪 {title}: dry-run, nếu chạy thật sẽ {what}.")
         owner = self.cfg["repo"].split("/")[0]
         found = self.gh.get("/pulls", state="open", base=self.cfg["base"], head=f"{owner}:{name}")
+        if rec.get("pr") and not any(x["number"] == rec["pr"] for x in found):
+            return self.tg.send(f"⚠️ {title}: PR #{rec['pr']} không còn mở, không merge.")
         pr = found[0] if found else self.gh.send("POST", "/pulls", {
             "title": rec.get("title") or f"Merge {name}", "head": name, "base": self.cfg["base"],
             "body": f"Tạo bởi merge-gate cho commit {p['sha']}.\n\nKết quả chạy thử: {rec.get('run_url', '')}"})
         link = f'<a href="{html.escape(pr["html_url"])}">PR #{pr["number"]}</a>'
+        rec.update(pr=pr["number"], pr_url=pr["html_url"])
         if not p["auto"]:
-            return self.tg.send(f"📝 {title}: đã tạo {link}. Hãy xem và merge tay.")
+            return self.tg.send(f"📝 {title}: {link}. Hãy xem và merge tay.")
         moved = self.head_of(self.cfg["base"]) != rec.get("base_sha")
-        rec.update(stage="pr_wait", pr=pr["number"], pr_url=pr["html_url"], deadline=self.clock() + PR_TIMEOUT)
+        rec.update(stage="pr_wait", deadline=self.clock() + PR_TIMEOUT)
         note = f"\n{esc(self.cfg['base'])} đã đổi sau lúc kiểm; CI của PR sẽ kiểm lại bản gộp." if moved else ""
         self.tg.send(f"🔀 {title}: {link}, chờ CI của PR xanh rồi merge.{note}")
 
