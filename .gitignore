@@ -5,6 +5,10 @@ node_modules/
 .env.*
 !.env.app.example
 !.env.monitoring.example
+!.env.mergegate.example
+
+# State của merge-gate khi chạy ngoài container
+ai-remediation/merge-gate/state.json
 
 # Script / user data trên EC2 chứa sẵn mật khẩu thật — không commit
 ec2/
@@ -12,3 +16,6 @@ ec2/
 # Python
 __pycache__/
 *.pyc
+
+# Log CI tải về (log thô, có thể chứa thông tin nhạy cảm)
+ai-remediation/ci-logs/data/

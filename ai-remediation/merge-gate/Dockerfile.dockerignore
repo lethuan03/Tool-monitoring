@@ -1,0 +1,7 @@
+# Chỉ đưa đúng các file image cần vào build context (không kéo theo log CI, file .env, state)
+*
+!ci-logs/fetch_logs.py
+!merge-gate/gate.py
+!merge-gate/ai.py
+!merge-gate/runner.py
+!merge-gate/rules.md

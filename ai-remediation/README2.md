@@ -452,3 +452,108 @@ Giới hạn của sandbox: không kiểm tra Telegram/Bedrock thật (**chất 
 - Chất lượng đề xuất của AI phụ thuộc vào model và runbook; cần theo dõi giai đoạn dry-run để chỉnh runbook.
 - Đề xuất lặp trong cùng 1 sự cố bị bỏ qua (đã chống trùng); cảnh báo mới (startsAt khác) là một sự cố mới.
 - `logs_tail` gửi tối đa 1500 ký tự log lên Telegram: log có thể chứa thông tin nhạy cảm, cân nhắc trước khi duyệt.
+
+## 10. Kéo log CI từ GitHub Actions — `ai-remediation/ci-logs/`
+
+Bước 1 của luồng "AI phân tích lỗi CI". **Mới chỉ tải log**; lớp filter và phần AI phân tích/báo lỗi chưa làm.
+
+```
+GitHub Actions ──(fetch_logs.py hỏi, chỉ đọc)──> data/<run_id>/<job_id>.log + .json ──> [filter: chưa làm] ──> [AI: chưa làm]
+```
+
+- `fetch_logs.py` (chỉ thư viện chuẩn Python) lấy các lần chạy đã xong trong `CI_LOG_DAYS` ngày, tải log của job có kết quả thuộc `CI_LOG_CONCLUSIONS` (mặc định `failure`). Job đã có file `.log` thì bỏ qua.
+- File `.log` là **log thô**, chưa lọc, chưa che bí mật. Thư mục `data/` đã chặn trong `.gitignore`.
+- File `.json` cạnh đó: workflow, tên job, step lỗi, nhánh, commit, link, `head_repo` (khác `repo` = PR từ fork).
+- Chưa nằm trong image/compose nào: chạy tay hoặc bằng cron. Chưa tự xoá log cũ.
+
+| Biến môi trường | Mặc định | Ý nghĩa |
+|---|---|---|
+| `GITHUB_REPO` | (bắt buộc) | `owner/repo` |
+| `GITHUB_TOKEN` | (bắt buộc) | Fine-grained token, chỉ repo này, quyền **Actions: Read-only** |
+| `CI_LOG_DIR` | `ai-remediation/ci-logs/data` | Nơi lưu log |
+| `CI_LOG_DAYS` | `5` | Lấy lần chạy tạo trong N ngày gần đây |
+| `CI_LOG_CONCLUSIONS` | `failure` | Kết quả job cần lấy, cách nhau dấu phẩy |
+| `GITHUB_API_URL` | `https://api.github.com` | Chỉ đổi khi test (token được gửi tới địa chỉ này) |
+
+Chạy (PowerShell):
+
+```powershell
+$env:GITHUB_REPO = "owner/repo"
+$env:GITHUB_TOKEN = Read-Host "GitHub token"
+python ai-remediation/ci-logs/fetch_logs.py
+```
+
+Test (GitHub giả trên 127.0.0.1): `python -m unittest discover -s ai-remediation/ci-logs/tests`
+
+**Chưa chạy thử với GitHub thật.**
+
+**Lưu ý cho bước sau:** log CI là nội dung không đáng tin (người gửi PR có thể in chữ gài lệnh cho AI) và có thể chứa bí mật. Trước khi đưa cho AI phải qua lớp filter (cắt đoạn lỗi, che token/mật khẩu), AI phân tích không được dùng công cụ nào.
+
+## 11. merge-gate — AI kiểm chức năng trước khi merge vào `main`
+
+Mọi code muốn vào `main` phải qua: **CI → AI soạn kịch bản test → chạy thử app thật trên máy ảo GitHub → AI đánh giá → người duyệt trên Telegram → tạo PR → CI của PR xanh → merge đúng commit đã kiểm.** Không phải viết unit test cho chức năng mới. CD và gán version chưa làm.
+
+```
+push nhánh ≠ main ─> CI ─> merge-gate (container trên máy local)
+        ├─ kiểm tra cứng (file .env/khoá -> chặn)
+        ├─ Bedrock: mô tả trong commit + diff -> kịch bản test (JSON)
+        ├─ workflow ai-test (bản trên main): dựng app đúng commit -> runner.py -> result.json
+        ├─ Bedrock: đọc kết quả + diff -> đạt / không đạt
+        └─ Telegram [✅ Tạo PR & merge] [❌ Từ chối]
+```
+
+### 11.1. Cách viết commit
+Ghi **chức năng đúng là thế nào** trong commit message, ví dụ: `Thêm mã giảm giá: SALE10 giảm 10%, mã sai trả 400`. Đây là chuẩn để AI chấm. Mô tả không đủ thì không tự merge.
+
+### 11.2. File
+
+| File | Việc |
+|---|---|
+| `merge-gate/gate.py` | Theo dõi nhánh, kiểm tra cứng, gọi workflow, Telegram, PR/merge |
+| `merge-gate/ai.py`, `rules.md` | Prompt, gọi Bedrock, kiểm định dạng câu trả lời, tiêu chí chấm |
+| `merge-gate/runner.py` | Chạy kịch bản HTTP (dữ liệu, không phải code), chỉ gọi localhost |
+| `merge-gate/baseline.json` | Kịch bản cơ bản luôn chạy (sản phẩm, đặt hàng, đăng nhập, quản trị) |
+| `webapp/docker-compose.test.yml` | App để chạy thử: mật khẩu giả, mạng riêng |
+| `.github/workflows/ai-test.yml` | Chạy thử trên GitHub; không secret, quyền chỉ đọc |
+
+### 11.3. Kết quả
+
+| Tin nhắn | Khi nào | Nút | Status `ai-gate` |
+|---|---|---|---|
+| ✅ ĐẠT | Mọi kịch bản đạt, AI đạt, không có lý do merge tay | Tạo PR & merge | success |
+| 🟡 merge tay | Đạt nhưng: sửa `.github/`, `merge-gate/`, `ci-logs/`, `policy.json`, file compose · có file ngoài `webapp/{backend,mysql,nginx}` (trừ `.md`) · AI không xem được hết · mô tả không rõ | Tạo PR (bạn merge) | pending |
+| 🟡 CHƯA KIỂM ĐỦ | `GATE_AI=off` | không | pending |
+| ❌ KHÔNG ĐẠT | CI hỏng, kịch bản fail, AI chấm fail hoặc trả lời hỏng, app không dựng được | không | failure |
+| ⛔ BỊ CHẶN | Diff có file `.env` thật hoặc khoá/token (không gửi cho AI) | không | failure |
+
+- Kịch bản fail thì AI không ghi đè được. Kịch bản **không chạy được** (lỗi bước chuẩn bị) được soạn lại 1 lần, phải giữ nguyên kết quả mong đợi.
+- Mỗi commit kiểm 1 lần (thường 2 lượt Bedrock, tối đa 3), giới hạn `GATE_MAX_REVIEWS_PER_DAY`. Muốn kiểm lại (vd CI lỗi tạm thời) thì push commit mới.
+- Lần chạy đầu chỉ ghi nhận các nhánh đang có. Bỏ qua `backup/*`, `test/*`; PR từ fork không xử lý.
+- Nút chỉ người trong `GATE_APPROVER_IDS` bấm được (chat nhóm không khai báo thì chặn), dùng 1 lần, hết hạn 24 giờ.
+
+### 11.4. Triển khai
+
+1. Đưa các file này vào `main` bằng PR **merge tay** (`workflow_dispatch` chỉ chạy khi `ai-test.yml` có trên `main`). Nhánh cũ cần gộp `main` để có `ci.yml` mới (chạy CI khi push mọi nhánh).
+2. Tạo **bot Telegram mới** (không dùng chung bot với remediator) và **fine-grained token** chỉ cho repo này: Actions, Contents, Pull requests, Commit statuses = Read and write. Không cấp Workflows.
+3. Chép `.env.mergegate.example` thành `.env.mergegate`, điền giá trị, giữ `GATE_MODE=dry-run`, `GATE_AI=off`.
+4. `docker compose -f ai-remediation/merge-gate/docker-compose.merge-gate.yml up -d --build`
+5. Chạy ổn thì đặt `GATE_AI=bedrock` (**bắt đầu tính phí**), vẫn dry-run, xem kịch bản AI soạn có đúng không.
+6. Đặt `GATE_MODE=execute`. Sau đó tạo ruleset cho `main`: bắt buộc PR, bắt buộc status `ai-gate` và các job CI, **không** bắt buộc approval; chủ repo trong danh sách bypass để merge tay.
+
+`dry-run` vẫn kích hoạt workflow chạy thử, nhưng không gắn status, không tạo PR, không merge.
+
+### 11.5. Kiểm thử và giới hạn
+
+- `python -m unittest discover -s ai-remediation/merge-gate/tests` (GitHub, Telegram, AI, app đều giả).
+- Chạy thử baseline trên máy (cần Docker):
+  ```
+  docker compose -f webapp/docker-compose.test.yml up -d --build --wait
+  python ai-remediation/merge-gate/runner.py --baseline ai-remediation/merge-gate/baseline.json
+  docker compose -f webapp/docker-compose.test.yml down -v
+  ```
+- **Đã thử cục bộ (27/11/2026):** baseline đạt 5/5 trên app dựng bằng `docker-compose.test.yml`; bản sao cố ý không trừ tồn kho khi đặt hàng bị baseline bắt fail; image `merge-gate` build được, test đạt trên Python 3.12, khởi động được với cấu hình giả khi không có mạng.
+- **Chưa thử:** workflow `ai-test` trên GitHub, Telegram và Bedrock thật, kịch bản do AI thật soạn, tạo PR/merge thật.
+- Chỉ chạy thử được qua HTTP API; giao diện (JS trong trình duyệt) chưa kiểm → merge tay.
+- AI có thể bỏ sót hoặc chấm sai; test mỗi lần có thể khác nhau, chỉ baseline là cố định.
+- Diff và mã nguồn backend được gửi tới Bedrock (khoá/token theo mẫu đã che).
+- Máy local tắt thì không có kiểm tra/merge.

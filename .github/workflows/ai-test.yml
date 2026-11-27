@@ -1,0 +1,73 @@
+# Chạy thử CHỨC NĂNG của một commit theo kịch bản do merge-gate gửi sang (xem ai-remediation/README2.md mục 11).
+# Workflow, bộ chạy và file compose lấy từ main (thư mục gate/); code cần test checkout riêng (thư mục target/)
+# nên nhánh được test không sửa được cách chấm. Không có secret, không push image, không gọi AWS/Telegram.
+name: ai-test
+run-name: ai-test ${{ inputs.request_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Commit cần test (40 ký tự)
+        required: true
+        type: string
+      request_id:
+        description: Mã yêu cầu để merge-gate tìm lại lần chạy
+        required: true
+        type: string
+      scenarios:
+        description: Kịch bản JSON do AI soạn (để trống = chỉ chạy kịch bản cơ bản)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    name: Chạy thử chức năng
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      APP_DIR: ${{ github.workspace }}/target/webapp
+      COMPOSE_FILE: gate/webapp/docker-compose.test.yml
+    steps:
+      # input chỉ đi vào qua biến môi trường, không ghép thẳng vào lệnh shell
+      - name: Kiểm tra input
+        env:
+          SHA: ${{ inputs.sha }}
+        run: '[[ "$SHA" =~ ^[0-9a-f]{40}$ ]]'
+      - uses: actions/checkout@v4
+        with:
+          path: gate
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          path: target
+          ref: ${{ inputs.sha }}
+          persist-credentials: false
+      - name: Ghi kịch bản
+        env:
+          SCENARIOS: ${{ inputs.scenarios }}
+        run: printf '%s' "$SCENARIOS" > scenarios.json
+      - name: Dựng app từ commit cần test
+        run: docker compose up -d --build --wait
+      - name: Chạy kịch bản
+        run: >-
+          python3 gate/ai-remediation/merge-gate/runner.py
+          --baseline gate/ai-remediation/merge-gate/baseline.json
+          --scenarios scenarios.json --out result.json
+      - name: Log app (khi lỗi)
+        if: failure()
+        run: docker compose logs --no-color --tail 200
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ai-test-result
+          path: result.json
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Dọn
+        if: always()
+        run: docker compose down -v
