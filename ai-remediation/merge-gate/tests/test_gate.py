@@ -42,11 +42,23 @@ class FakeGitHub:
         self.message = "Thêm API /api/products/sale trả 200"
         self.ci = {"push": "success", "pull_request": "success"}
         self.jobs = JOBS
-        self.pulls, self.writes, self.dispatches, self.reads = [], [], [], []
+        self.pulls, self.closed, self.writes, self.dispatches, self.reads = [], [], [], [], []
         self.results = [["passed"]]  # trạng thái kịch bản MỚI ở mỗi lượt chạy thử
         self.saved_status, self.baseline_status, self.no_result = "passed", "passed", False
         self.pr = {"number": 5, "state": "open", "merged": False, "mergeable": True, "head": {"sha": SHA}}
         self.merge_error = None
+
+    def open_pr(self, branch, sha, number=5, draft=False, repo="me/shop"):
+        self.pulls = [p for p in self.pulls if p["head"]["ref"] != branch] + [
+            {"number": number, "draft": draft, "html_url": f"http://pr/{number}",
+             "head": {"ref": branch, "sha": sha, "repo": {"full_name": repo}}}]
+        self.pr = {"number": number, "state": "open", "merged": False, "mergeable": True, "head": {"sha": sha}}
+
+    def close_pr(self, branch, merged):
+        for pr in [p for p in self.pulls if p["head"]["ref"] == branch]:
+            self.pulls.remove(pr)
+            self.closed.append({**pr, "merged_at": "2026-01-01" if merged else None})
+        self.pr = {**self.pr, "state": "closed", "merged": merged}
 
     def pages(self, path, key=None, **params):
         if path == "/branches":
@@ -80,7 +92,8 @@ class FakeGitHub:
         if path.startswith("/git/ref/heads/"):
             return {"object": {"sha": self.heads[path.split("heads/")[1]]}}
         if path == "/pulls":
-            return []
+            found = self.closed if params["state"] == "closed" else self.pulls
+            return [p for p in found if f"me:{p['head']['ref']}" == params["head"]]
         if path.startswith("/pulls/"):
             return self.pr
         raise AssertionError(path)
@@ -113,6 +126,11 @@ class FakeGitHub:
         self.writes.append((method, path, body))
         if path.endswith("/merge") and self.merge_error:
             raise http_error(self.merge_error)
+        if path.endswith("/merge"):
+            for pr in [p for p in self.pulls if f"/pulls/{p['number']}/merge" == path]:
+                self.close_pr(pr["head"]["ref"], merged=True)
+        if path == "/pulls":
+            self.open_pr(body["head"], self.heads[body["head"]])
         return {"number": 5, "html_url": "http://pr/5"}
 
 
@@ -182,12 +200,13 @@ class Base(unittest.TestCase):
             g.tick()
             self.now += 130
 
-    def offer(self, g=None, branch="feature", sha=SHA):
-        """Push commit mới, chạy tới thẻ xin phép kiểm."""
+    def offer(self, g=None, branch="feature", sha=SHA, number=5):
+        """Push commit mới và mở PR, chạy tới thẻ xin phép kiểm."""
         if g is None:
             g = self.make()
             g.tick()
         self.gh.heads[branch] = sha
+        self.gh.open_pr(branch, sha, number)
         self.run_ticks(g, 3)
         return g
 
@@ -246,17 +265,22 @@ class FlowTest(Base):
         self.run_ticks(g)
         self.assertEqual((self.model.calls, self.gh.dispatches), ([], []))
 
-    def test_pass_approve_creates_pr_and_merges_reviewed_commit(self):
+    def test_pass_approve_merges_reviewed_commit_of_the_pr(self):
         g = self.push()
         self.assertIn("ĐẠT", self.result_text())
+        self.assertIn("PR #5", self.result_text())
         self.assertEqual(self.statuses(), ["success"])
-        self.assertNotIn("/pulls", self.paths())  # chưa duyệt thì chưa tạo PR
+        self.assertNotIn("/pulls/5/merge", self.paths())  # chưa duyệt thì chưa merge
         self.press(g)
         g.tick()
         self.assertIn(("PUT", "/pulls/5/merge", {"sha": SHA, "merge_method": "merge"}), self.gh.writes)
         self.assertIn("đã merge", self.last())
         self.assertEqual(len(self.model.calls), 2)
         self.assertEqual(self.gh.dispatches[0]["ref"], "main")
+        self.assertNotIn("/pulls", self.paths())  # dùng PR có sẵn, không tạo thêm
+        count = len(self.tg.sent)
+        self.run_ticks(g)
+        self.assertEqual([t for t, b in self.tg.sent[count:] if b], [])  # merge xong không hỏi lại
 
     def test_progress_message_is_edited(self):
         self.push()
@@ -297,20 +321,11 @@ class FlowTest(Base):
         self.assertEqual(len(self.gh.dispatches), 1)
         self.assertIn("dry-run", self.last())
 
-    def test_old_branches_ignored_until_pr_opened(self):
-        g = self.offer(branch="test/x")  # nhánh trong danh sách bỏ qua
-        self.assertEqual(self.cards(), [])
-        self.gh.pulls = [{"head": {"ref": "old", "sha": "c" * 40, "repo": {"full_name": "other/fork"}}}]
-        self.run_ticks(g, 2)
-        self.assertEqual(self.cards(), [])  # PR từ fork
-        self.gh.pulls[0]["head"]["repo"]["full_name"] = "me/shop"
-        self.run_ticks(g, 3)
-        self.assertTrue(self.has("t"))
-
     def test_quiet_period_and_no_changed_file(self):
         g = self.make()
         g.tick()
         self.gh.heads["feature"] = SHA
+        self.gh.open_pr("feature", SHA)
         g.tick()
         self.assertEqual(self.cards(), [])
         self.reset()
@@ -319,7 +334,7 @@ class FlowTest(Base):
         self.assertEqual(self.cards(), [])
 
     def test_ci_failed_or_job_missing_never_offers_test(self):
-        for change in ({"ci": {"push": "failure"}}, {"jobs": JOBS[:2]}):
+        for change in ({"ci": {"push": "success", "pull_request": "failure"}}, {"jobs": JOBS[:2]}):
             with self.subTest(change=change):
                 self.reset()
                 vars(self.gh).update(change)
@@ -370,12 +385,11 @@ class ResultTest(Base):
         self.gh.results, self.model.cause, self.model.verdict = [["failed"]], "test", "fail"
         g = self.push()
         self.assertIn("nghi do kịch bản", self.result_text())
-        self.assertEqual(self.kinds(), ["a", "n", "d", "r"])
+        self.assertEqual(self.kinds(), ["n", "d", "r"])  # PR đã có: chỉ merge tay trên GitHub
+        self.assertIn("merge tay trên GitHub", self.result_text())
         self.assertEqual(self.statuses(), ["pending"])
-        self.press(g, "a")
-        g.tick()
-        self.assertIn("/pulls", self.paths())
-        self.assertNotIn("/pulls/5/merge", self.paths())
+        self.gh.close_pr("feature", merged=True)
+        self.run_ticks(g, 2)
         self.assertEqual(g.state["saved"], [])  # kịch bản không đạt không được lưu
 
     def test_not_suspect_when_other_evidence_points_to_code(self):
@@ -426,6 +440,7 @@ class ResultTest(Base):
         self.assertIn("đã soạn lại", self.result_text())
         self.assertEqual(self.statuses(), ["success"])
         self.press(g)
+        self.run_ticks(g, 2)
         self.assertEqual(len(g.state["saved"]), 1)
 
     def test_repair_stops_after_one_round(self):
@@ -460,9 +475,9 @@ class ResultTest(Base):
                 g = self.push()
                 self.assertIn(reason, self.result_text())
                 self.assertEqual(self.statuses(), ["pending"])
-                self.press(g)
+                self.assertNotIn("a", self.kinds())
+                self.assertIn("merge tay trên GitHub", self.result_text())
                 g.tick()
-                self.assertIn("/pulls", self.paths())
                 self.assertNotIn("/pulls/5/merge", self.paths())
 
     def test_changing_feature_docs_is_warned(self):
@@ -475,14 +490,43 @@ class SavedTest(Base):
     def approve_first(self):
         g = self.push()
         self.press(g)
-        g.tick()
+        self.run_ticks(g, 2)  # merge rồi tick sau mới lưu
         return g
 
-    def test_approved_scenarios_rerun_next_time(self):
+    def test_saved_only_after_merge(self):
+        self.env["GATE_MODE"] = "dry-run"
+        g = self.push()
+        self.press(g)
+        self.run_ticks(g)
+        self.assertEqual((g.state["saved"], len(g.state["waiting"])), ([], 1))  # duyệt chưa phải merge
+        self.gh.close_pr("feature", merged=True)  # người merge tay trên GitHub
+        self.run_ticks(g, 2)
+        self.assertEqual((len(g.state["saved"]), g.state["waiting"]), (1, []))
+        self.assertTrue(any("lưu 1 kịch bản" in t for t, _ in self.tg.sent))
+
+    def test_not_saved_when_closed_other_commit_rejected_or_expired(self):
+        for case in ("closed", "other", "reject", "expired"):
+            with self.subTest(case):
+                self.reset()
+                g = self.push()
+                if case == "closed":
+                    self.gh.close_pr("feature", merged=False)
+                elif case == "other":  # PR được merge nhưng ở commit khác commit đã kiểm
+                    self.gh.open_pr("feature", SHA2)
+                    self.gh.close_pr("feature", merged=True)
+                elif case == "reject":
+                    self.press(g, "r")
+                    self.gh.close_pr("feature", merged=True)
+                else:
+                    self.now += gate.WAITING_TTL + 1
+                self.run_ticks(g, 2)
+                self.assertEqual(g.state["saved"], [])
+
+    def test_merged_scenarios_rerun_next_time(self):
         g = self.approve_first()
         self.assertEqual([s["features"] for s in g.state["saved"]], [["Sản phẩm"]])
         self.model.scenarios = []
-        self.offer(g, branch="next", sha=SHA2)
+        self.offer(g, branch="next", sha=SHA2, number=6)
         self.assertIn("1 kịch bản đã lưu", self.last())
         self.press(g, "t")
         self.run_ticks(g)
@@ -493,7 +537,7 @@ class SavedTest(Base):
         g = self.approve_first()
         self.model.scenarios = [{**SCENARIO, "name": "mới", "steps": SCENARIO["steps"][1:]}]
         self.model.cause, self.gh.saved_status = "test", "failed"
-        self.offer(g, branch="next", sha=SHA2)
+        self.offer(g, branch="next", sha=SHA2, number=6)
         self.press(g, "t")
         self.run_ticks(g)
         self.assertNotIn("a", self.kinds())
@@ -507,6 +551,110 @@ class SavedTest(Base):
         self.model.scenarios = [{**SCENARIO, "source": "saved", "name": "[cũ] giả"}]
         self.push()
         self.assertEqual([(s.get("source"), s["name"]) for s in self.gh.sent()], [(None, "giả")])
+
+
+class RequestTest(Base):
+    def started(self):
+        g = self.make()
+        g.tick()
+        return g
+
+    def test_push_without_pr_does_nothing(self):
+        g = self.started()
+        self.gh.heads["feature"] = SHA
+        self.run_ticks(g)
+        self.assertEqual((self.cards(), self.model.calls, self.gh.dispatches), ([], [], []))
+        self.gh.open_pr("feature", SHA)
+        self.run_ticks(g)
+        self.assertEqual(self.kinds(), ["t", "x"])
+        self.assertIn("PR #5", self.last())
+
+    def test_fork_draft_and_ignored_branch(self):
+        g = self.started()
+        self.gh.heads.update({"feature": SHA, "test/x": SHA2})
+        self.gh.open_pr("feature", SHA, repo="other/fork")
+        self.gh.open_pr("test/x", SHA2, number=6)
+        self.run_ticks(g)
+        self.gh.open_pr("feature", SHA, draft=True)
+        self.run_ticks(g)
+        self.assertEqual(self.cards(), [])
+        self.gh.open_pr("feature", SHA)  # chuyển sang sẵn sàng
+        self.run_ticks(g)
+        self.assertEqual(self.kinds(), ["t", "x"])
+
+    def test_existing_pr_on_first_run_is_offered(self):
+        self.gh.open_pr("old", "c" * 40)
+        g = self.started()
+        self.run_ticks(g)
+        self.assertEqual(self.kinds(), ["t", "x"])
+
+    def test_same_pr_asked_once_new_commit_asked_again(self):
+        g = self.offer()
+        self.press(g, "x")
+        self.run_ticks(g)
+        self.assertEqual(len(self.cards()), 1)
+        self.offer(g, sha=SHA2)
+        self.assertEqual(len(self.cards()), 2)
+
+    def test_closed_pr_cancels_and_reopen_asks_again(self):
+        g = self.offer()
+        allow = self.data("t")
+        self.gh.close_pr("feature", merged=False)
+        self.run_ticks(g)
+        self.assertIn("PR #5 đã đóng", self.last())
+        self.press(g, data=allow)
+        self.assertEqual((g.state["pending"], self.gh.dispatches), ({}, []))
+        self.gh.open_pr("feature", SHA)
+        self.run_ticks(g)
+        self.assertEqual(len(self.cards()), 2)
+
+    def test_pr_closed_right_before_approval_is_not_recreated(self):
+        g = self.push()
+        self.gh.close_pr("feature", merged=False)
+        self.press(g)
+        self.assertIn("không còn mở", self.last())
+        self.assertEqual([p for p in self.paths() if p.startswith("/pulls")], [])
+
+    def test_command_flow_without_pr_creates_it(self):
+        g = self.started()
+        self.say(g, "/test old")
+        self.press(g, "t")
+        self.run_ticks(g)
+        self.press(g)
+        self.run_ticks(g, 3)
+        self.assertIn("/pulls", self.paths())
+        self.assertIn("/pulls/5/merge", self.paths())
+        self.assertEqual(len(g.state["saved"]), 1)
+
+    def test_command_flow_manual_case_creates_pr_only(self):
+        self.model.clear = False
+        g = self.started()
+        self.say(g, "/test old")
+        self.press(g, "t")
+        self.run_ticks(g)
+        self.press(g)
+        self.run_ticks(g, 3)
+        self.assertIn("/pulls", self.paths())
+        self.assertNotIn("/pulls/5/merge", self.paths())
+        self.assertEqual(len(self.cards()), 2)  # PR vừa tạo không bị coi là yêu cầu mới
+
+    def test_pr_opened_after_test_resends_card_without_ai(self):
+        g = self.started()
+        self.say(g, "/test old")
+        self.press(g, "t")
+        self.run_ticks(g)
+        self.press(g, "r")
+        calls = len(self.model.calls)
+        self.gh.open_pr("old", "c" * 40)
+        self.run_ticks(g)
+        self.assertEqual((self.kinds(), len(self.model.calls)), (["a", "r"], calls))
+        self.assertIn("PR #5", self.last())
+
+    def test_test_command_keeps_open_pr(self):
+        g = self.push()
+        self.say(g, "/test feature")
+        self.assertEqual(g.state["branches"]["feature"]["pr"], 5)
+        self.assertIn("PR #5", self.last())
 
 
 class SafetyTest(Base):
@@ -536,11 +684,11 @@ class SafetyTest(Base):
         self.gh.heads["feature"] = SHA2
         self.press(g)
         self.assertIn("có commit mới", self.last())
-        self.assertNotIn("/pulls", self.paths())
+        self.assertNotIn("/pulls/5/merge", self.paths())
 
     def test_new_commit_while_waiting_pr_ci_stops_merge(self):
-        self.gh.ci["pull_request"] = "running"
         g = self.push()
+        self.gh.ci["pull_request"] = "running"
         self.press(g)
         g.tick()
         self.gh.pr["head"]["sha"] = SHA2
@@ -573,7 +721,7 @@ class SafetyTest(Base):
         self.press(g, "r")
         g.tick()
         self.assertEqual(self.statuses(), ["success", "failure"])
-        self.assertNotIn("/pulls", self.paths())
+        self.assertNotIn("/pulls/5/merge", self.paths())
 
     def test_approval_expires(self):
         g = self.push()

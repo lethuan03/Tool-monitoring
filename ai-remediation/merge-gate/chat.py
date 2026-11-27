@@ -13,6 +13,7 @@ HISTORY_TURNS = 6
 RUNNING = ("new", "ask", "plan", "dispatch", "testing", "review", "report", "pr_wait")
 
 HELP = """<b>merge-gate</b>
+Mở PR vào main là bot tự xin phép kiểm. Push thôi thì bot không làm gì.
 /status — các nhánh đang xử lý (không gọi AI)
 /test &lt;nhánh&gt; [yêu cầu thêm] — xin phép kiểm một nhánh
 /merge &lt;nhánh&gt; — xin gộp vào main (chưa đạt thì đề nghị kiểm trước)
@@ -66,9 +67,11 @@ class ChatMixin:
                 continue
             outcome = (rec.get("decision") or {}).get("outcome")
             label = f" · {views.HEADLINES[outcome][1]}" if outcome else ""
-            lines.append(f"• <b>{views.esc(name)}</b> <code>{rec['sha'][:7]}</code>: {views.STAGES.get(rec['stage'], rec['stage'])}{label}")
+            number = f" PR #{rec['pr']}" if rec.get("pr") else ""
+            lines.append(f"• <b>{views.esc(name)}</b>{number} <code>{rec['sha'][:7]}</code>: "
+                         f"{views.STAGES.get(rec['stage'], rec['stage'])}{label}")
         if len(lines) == 1:
-            lines.append("Chưa có nhánh nào có commit mới.")
+            lines.append("Chưa có yêu cầu merge nào.")
         used = len([t for t in self.state["reviews"] if now - t < 86400])
         chats = len([t for t in self.state["chat_calls"] if now - t < 86400])
         lines.append(f"AI trong 24 giờ: {used}/{self.cfg['max_reviews']} lần kiểm, {chats}/{self.cfg['max_chats']} tin chat. "
@@ -98,7 +101,8 @@ class ChatMixin:
             return self.tg.send(f"<b>{views.esc(name)}</b> đang xử lý: {views.STAGES[rec['stage']]}.")
         self.drop_pending(name)
         self.state["branches"][name] = {"sha": rec["sha"], "stage": "new", "seen_at": self.clock() - self.cfg["quiet"],
-                                        "notes": notes[:600], "requested": True}
+                                        "notes": notes[:600], "requested": True,
+                                        **{k: rec[k] for k in ("pr", "pr_url") if k in rec}}
         self.advance(name)
         current = self.state["branches"][name]["stage"]
         if current == "new":
@@ -151,11 +155,10 @@ class ChatMixin:
                       "ket_qua_khong_dat": [r for r in rec.get("results") or [] if r["status"] != "passed"][:6],
                       "so_kich_ban_dat": sum(r["status"] == "passed" for r in rec.get("results") or []),
                       "danh_gia": rec.get("review")}
-            if rec["stage"] != "baseline":
-                try:
-                    detail["diff"] = self.diff_of(rec["sha"])[:8000]
-                except (OSError, ValueError, KeyError):
-                    detail["diff"] = "(không đọc được)"
+            try:
+                detail["diff"] = self.diff_of(rec["sha"])[:8000]
+            except (OSError, ValueError, KeyError):
+                detail["diff"] = "(không đọc được)"
             data["nhanh_dang_ban"] = detail
         return json.dumps(data, ensure_ascii=False)
 
